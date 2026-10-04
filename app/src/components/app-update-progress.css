@@ -1,0 +1,14 @@
+.app-update-progress {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 30;
+  width: min(360px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  margin: 0;
+  box-shadow: 0 8px 28px #0003;
+  -webkit-app-region: no-drag;
+}
+.app-update-progress .progress-error { overflow-wrap: anywhere; }
+.app-update-progress .button { margin-top: 10px; }

@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+/dist/
+/.build/
+/release/
+/.agents/
+/config.json
+/assets.csv
+
+# Portable library metadata and legacy app state.
+.data/
+/state/*
+!/state/cache.json
+
+# Atomic-write leftovers
+/tmp*.tmp
+
+/docs/
+/plans/
+
+# Local knowledge graph and incremental extraction cache
+/graphify-out/
