@@ -591,7 +591,8 @@ function assertImportIdle() {
 }
 
 function importSnapshot() {
-  return importJob ? JSON.parse(JSON.stringify(importJob)) : null;
+  try { return importJob ? JSON.parse(JSON.stringify(importJob)) : null; }
+  catch (cause) { throw new Error("Could not copy import status.", { cause }); }
 }
 
 function importCli(command, extra = [], onProgress) {
@@ -707,7 +708,8 @@ function packageInstallActive() {
 
 function packageInstallSnapshot() {
   if (!packageInstallJob || packageInstallLibrary !== backendSession?.vaultRoot) return null;
-  return JSON.parse(JSON.stringify(packageInstallJob));
+  try { return JSON.parse(JSON.stringify(packageInstallJob)); }
+  catch (cause) { throw new Error("Could not copy package installation status.", { cause }); }
 }
 
 async function executePackageInstall(request, guard) {
@@ -733,10 +735,10 @@ async function executePackageInstall(request, guard) {
     job.stage = "preflight";
     temp = fs.mkdtempSync(path.join(os.tmpdir(), "ual-packages-"));
     const manifest = path.join(temp, "request.json");
-    fs.writeFileSync(manifest, JSON.stringify({ id: job.id, project: request.project, packages }), { mode: 0o600 });
+    fs.writeFileSync(manifest, JSON.stringify({ id: job.id, project: request.project, packages, overwrite: request.overwrite === true }), { mode: 0o600 });
     const root = app.isPackaged ? path.join(process.resourcesPath, "ual-backend") : path.resolve(__dirname, "..");
     const outcome = await runPythonCli([path.join(root, "bin", "install_favorite_packages.py"), "run", "--request", manifest], update, root);
-    if (!outcome || !["completed", "failed"].includes(outcome.status)) throw new Error("Package worker ended without a terminal result. Check the project before retrying.");
+    if (!outcome || !["completed", "failed", "awaiting_confirmation"].includes(outcome.status)) throw new Error("Package worker ended without a terminal result. Check the project before retrying.");
     update(outcome);
     job.status = outcome.status;
     job.error = outcome.error || null;
@@ -754,7 +756,8 @@ function startPackageInstall(request) {
   assertImportIdle();
   if (quitting) throw new Error("The application is quitting.");
   const guard = assertBackendRequestAllowed();
-  if (!request || Object.keys(request).length !== 2 || !Array.isArray(request.ids) ||
+  if (!request || Object.keys(request).some((key) => !["project", "ids", "overwrite"].includes(key)) ||
+      (Object.hasOwn(request, "overwrite") && typeof request.overwrite !== "boolean") || !Array.isArray(request.ids) ||
       !request.ids.length || request.ids.length > 1000 || new Set(request.ids).size !== request.ids.length ||
       request.ids.some((id) => typeof id !== "string" || !id.trim())) throw new Error("Choose saved packages and a Unity project.");
   const project = importProjectPath(request.project);
@@ -762,7 +765,7 @@ function startPackageInstall(request) {
   packageInstallLibrary = guard.session.vaultRoot;
   packageInstallJob = { id: crypto.randomUUID(), kind: "packages", status: "queued", stage: "queued", project,
     completed: 0, total: ids.length, current_item: null, results: [], error: null, started_at: Date.now() / 1000 };
-  packageInstallPromise = executePackageInstall({ project, ids }, guard);
+  packageInstallPromise = executePackageInstall({ project, ids, overwrite: request.overwrite === true }, guard);
   return packageInstallSnapshot();
 }
 
@@ -849,7 +852,9 @@ function registerIpc() {
   ipcMain.handle("storage:choose-folder", (_event, currentPath) => chooseStorageFolder(currentPath));
   ipcMain.handle("storage:save", (_event, selectedPath) => saveStorage(selectedPath));
   ipcMain.handle("shell:open-external", (_event, url) => {
-    const parsed = new URL(url);
+    let parsed;
+    try { parsed = new URL(url); }
+    catch (cause) { throw new Error("Choose a valid web link.", { cause }); }
     if (!["https:", "http:"].includes(parsed.protocol)) throw new Error("Only web links can be opened.");
     return shell.openExternal(parsed.toString());
   });

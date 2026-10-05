@@ -533,7 +533,7 @@ function App() {
     }, 650);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [packageJob?.id, packageJob?.status]);
-  async function startSavedPackageInstall(request: { project: string; ids: string[] }) {
+  async function startSavedPackageInstall(request: PackageInstallRequest) {
     const next = await api.startPackageInstall(request);
     setPackageJob(next);
     setPackageJobError("");
@@ -1455,7 +1455,7 @@ function App() {
               {state?.job && !dismissedIds.has(state.job.id) && <ActionProgress job={state.job} onDismiss={dismissEnrich} />}
               {importJob && !dismissedIds.has(importJob.id) && <ActionProgress job={importJob} onDismiss={dismissImportJob} onReview={() => { setTasksOpen(false); openImportReview(); }} />}
               {downloadMessage && <section className={`download-status${downloadFailed ? " failed" : ""}`} role="status" aria-atomic="true"><span>{downloadMessage}</span>{!downloadingAsset && <Button className="icon-button" aria-label="Dismiss download status" onPress={() => { setDownloadMessage(""); setDownloadFailed(false); }}><Icon as={X} className="icon" aria-hidden="true" /></Button>}</section>}
-              <PackageInstallProgress job={packageJob && !dismissedIds.has(packageJob.id) ? packageJob : null} jobError={packageJobError} onDismiss={(id) => setDismissedIds((current) => new Set(current).add(id))} />
+              <PackageInstallProgress onInstall={startSavedPackageInstall} job={packageJob && !dismissedIds.has(packageJob.id) ? packageJob : null} jobError={packageJobError} onDismiss={(id) => setDismissedIds((current) => new Set(current).add(id))} />
             </PopoverContent>
           </Popover>}
           <Button ref={keyboardGuideRef} type="button" className="icon-button" aria-label="Keyboard shortcuts" title={shortcutModifier + " /"} onPress={openShortcutHelp}><Icon as={Keyboard} className="icon" aria-hidden="true" /></Button>

@@ -11,13 +11,13 @@ type Props = {
   storageEpoch: number;
   hidden?: boolean;
   job: PackageInstallJob | null;
-  onInstall: (request: { project: string; ids: string[] }) => Promise<PackageInstallJob>;
+  onInstall: (request: PackageInstallRequest) => Promise<PackageInstallJob>;
 };
 
 const api = window.ual;
 const message = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback;
 const resultLabels: Record<PackageInstallResult["status"], string> = {
-  pending: "Waiting", installing: "Installing", installed: "Installed", skipped: "Already in project", failed: "Failed",
+  pending: "Waiting", installing: "Installing", installed: "Installed", skipped: "Already in project", conflict: "Confirm replacement", failed: "Failed",
 };
 function detectPackageKind(source: string): FavoritePackage["kind"] | null {
   const value = source.trim();
@@ -33,16 +33,56 @@ function detectPackageKind(source: string): FavoritePackage["kind"] | null {
   return null;
 }
 
-export function PackageInstallProgress({ job, jobError, onDismiss }: { job: PackageInstallJob | null; jobError: string; onDismiss: (id: string) => void }) {
+export function PackageInstallProgress({ job, jobError, onDismiss, onInstall }: { job: PackageInstallJob | null; jobError: string; onDismiss: (id: string) => void; onInstall: (request: PackageInstallRequest) => Promise<PackageInstallJob> }) {
   const active = Boolean(job && ["queued", "running"].includes(job.status));
+  const conflicts = job?.results.filter(row => row.status === "conflict") || [];
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const replaceRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    setConfirmOpen(job?.status === "awaiting_confirmation");
+    setError("");
+  }, [job?.id, job?.status]);
+  async function replaceVersions() {
+    if (!job || working || !conflicts.length) return;
+    setWorking(true);
+    setError("");
+    try {
+      await onInstall({ project: job.project, ids: conflicts.map(row => row.id), overwrite: true });
+      setConfirmOpen(false);
+    } catch (cause) {
+      setError(message(cause, "Could not start package replacement."));
+    } finally { setWorking(false); }
+  }
   return <>
     {jobError && <p className="favorite-packages-error" role="alert">{jobError}</p>}
     {job && <section className="favorite-package-progress" aria-live="polite" aria-label="Saved package installation progress">
-      <div className="progress-heading"><strong>{active ? "Installing packages…" : job.status === "completed" ? "Package installation complete" : "Package installation finished with issues"}</strong>{!active && <Button className="icon-button" aria-label="Dismiss package installation result" onPress={() => onDismiss(job.id)}><Icon as={X} className="icon" aria-hidden="true" /></Button>}</div>
+      <div className="progress-heading"><strong>{active ? job.stage === "awaiting_refresh" ? "Waiting for Unity refresh" : "Installing packages…" : job.status === "awaiting_confirmation" ? "Confirm package replacement" : job.status === "completed" ? "Package installation complete" : "Package installation finished with issues"}</strong>{!active && <Button className="icon-button" aria-label="Dismiss package installation result" onPress={() => onDismiss(job.id)}><Icon as={X} className="icon" aria-hidden="true" /></Button>}</div>
       <p>{job.completed} / {job.total} processed{job.current_item ? ` · ${job.current_item}` : ""}</p><code>{job.project}</code>
-      {job.error && <p className="favorite-packages-error">{job.error}</p>}
-      <ul>{job.results.map(row => <li key={row.id} data-status={row.status}><span>{row.label}</span><strong>{resultLabels[row.status]}</strong>{row.error && <p className="favorite-packages-error">{row.error}</p>}</li>)}</ul>
+      {active && job.stage === "awaiting_refresh" && <p role="status">In the target Unity Editor, choose Assets → Refresh (⌘R on macOS). Keep Unity open while Package Manager resolves the packages.</p>}
+      {job.error && <p className="favorite-packages-error" role="alert">{job.error}</p>}
+      <ul>{job.results.map(row => <li key={row.id} data-status={row.status}><span>{row.label}</span><strong>{row.status === "installing" && job.stage === "awaiting_refresh" ? "Awaiting Unity" : resultLabels[row.status]}</strong>{row.error && <p className={row.status === "failed" ? "favorite-packages-error" : undefined}>{row.error}</p>}</li>)}</ul>
+      {conflicts.length > 0 && <Button ref={replaceRef} className="button primary" isDisabled={active || working} onPress={() => setConfirmOpen(true)}>Review replacement</Button>}
     </section>}
+    {job && confirmOpen && conflicts.length > 0 && <AlertDialog isOpen onClose={() => { if (!working) setConfirmOpen(false); }} finalFocusRef={replaceRef} isKeyboardDismissable={!working} closeOnOverlayClick={false} className="dialog-overlay">
+      <AlertDialogBackdrop className="dialog-backdrop" />
+      <AlertDialogContent className="action-dialog favorite-package-dialog" aria-labelledby="package-replace-title">
+        <AlertDialogHeader className="dialog-top"><h2 id="package-replace-title">Replace installed package versions?</h2></AlertDialogHeader>
+        <AlertDialogBody className="favorite-package-body">
+          <p>The target project already uses a different version or source. Replace only the packages below?</p>
+          <p className="favorite-package-target">{job.project}</p>
+          <ul className="favorite-packages-list">{conflicts.map(row => <li key={row.id}>
+            <strong>{row.label}</strong><p>Installed: <code>{row.existing_spec || "Existing project dependency"}</code></p><p>Requested: <code>{row.requested_spec || row.source}</code></p>
+          </li>)}</ul>
+          {error && <p className="favorite-packages-error" role="alert">{error}</p>}
+        </AlertDialogBody>
+        <AlertDialogFooter className="dialog-footer">
+          <Button className="button quiet" isDisabled={working} onPress={() => { setConfirmOpen(false); onDismiss(job.id); }}>Keep existing</Button>
+          <Button className="button primary" isDisabled={working} onPress={() => void replaceVersions()}>{working ? "Starting replacement…" : "Replace version"}</Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>}
   </>;
 }
 
@@ -251,7 +291,7 @@ export default function FavoritePackages({ disabled, storageEpoch, hidden = fals
               <Button className="button quiet" onPress={() => void browse()} isDisabled={blocked || inspecting}><Icon as={FolderOpen} className="icon" />Browse…</Button>
             </div>
             {project && <p>{project.title} · Unity {project.version}</p>}
-            <p role={inspecting ? "status" : undefined}>{inspecting ? "Checking project…" : "Close its Unity Editor before installing. Matching packages are skipped; conflicting versions are kept."}</p>
+            <p role={inspecting ? "status" : undefined}>{inspecting ? "Checking project…" : "Unity can stay open. Matching packages are skipped; replacing an existing version requires your confirmation."}</p>
             {projectError && <p className="favorite-packages-error" role="alert">{projectError}</p>}
           </SpotlightCard>
           <h3>Packages · {selected.length} selected</h3>
