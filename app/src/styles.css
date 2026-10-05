@@ -340,6 +340,7 @@ button:disabled, input:disabled, select:disabled {
 .content-head h2 { font-size: 20px; line-height: 1.25; letter-spacing: -0.025em; font-weight: 650; }
 .content-head p { margin-top: 4px; color: var(--muted); font-size: 12px; }
 .view-controls { display: flex; gap: var(--space-2); align-items: center; }
+.view-controls .rubber-segment__item { height: calc(36px - var(--rs-inset) * 2); }
 
 .icon-button {
   width: var(--control-height);
