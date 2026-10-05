@@ -582,13 +582,43 @@ app.whenReady().then(async () => {
     await click('[aria-label="Dismiss package installation result"]');
     await waitFor('!document.querySelector(".task-indicator") && !document.querySelector(".task-details")');
     console.log("PASS: saved-package polling survives Settings navigation and releases library-change guards");
-    await evaluate('localStorage.setItem("ual:test-package-favorites", JSON.stringify([{ id: "math", label: "Math", kind: "registry", source: "com.unity.mathematics", version: "1.3.2" }])); localStorage.setItem("ual:prefs", JSON.stringify({ filters: { quick: "favorites" } })); localStorage.setItem("ual:test-delay-inspection", "true")');
+    await evaluate('localStorage.setItem("ual:test-package-favorites", JSON.stringify([{ id: "math", label: "Math", kind: "registry", source: "com.unity.mathematics", version: "1.3.2" }, { id: "git", label: "Git tooling package", kind: "git", source: "https://github.com/example/unity-editor-tooling.git?path=/Packages/com.example.editor-tooling", version: "release/1.2.3" }])); localStorage.setItem("ual:prefs", JSON.stringify({ filters: { quick: "favorites" } })); localStorage.setItem("ual:test-delay-inspection", "true")');
     await win.reload();
     await waitFor('document.querySelector(".favorite-package-disclosure") && !document.querySelector(".favorite-package-disclosure").open');
     await click(".favorite-package-disclosure summary");
     await waitFor('document.querySelector(".favorite-packages-list")?.textContent.includes("Math")');
     await click(".favorite-packages-heading .primary");
     await waitFor(`!!document.querySelector('[role="combobox"][aria-label="Target Unity project"]')`);
+    for (const width of [1200, 600, 390]) {
+      win.setSize(width, 800);
+      await waitFor(`window.innerWidth === ${width}`);
+      await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+      const rows = await evaluate(`Array.from(document.querySelectorAll('.favorite-package-dialog .favorite-package-row')).map(row => {
+        const choice = row.querySelector('.favorite-package-choice');
+        const info = row.querySelector('.favorite-package-info');
+        const rowRect = row.getBoundingClientRect();
+        const choiceRect = choice.getBoundingClientRect();
+        const infoRect = info.getBoundingClientRect();
+        return { label: info.querySelector('strong').textContent, rowWidth: rowRect.width, choiceWidth: choiceRect.width, infoWidth: infoRect.width, height: rowRect.height, overflow: row.scrollWidth > row.clientWidth + 1, right: infoRect.right, rowRight: rowRect.right };
+      })`);
+      const screenshot = path.join(os.tmpdir(), `ual-package-review-${width}.png`);
+      fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG());
+      assert.equal(rows.length, 2, 'Both registry and Git packages appear in review');
+      for (const row of rows) {
+        assert(row.choiceWidth >= row.rowWidth - 1, `${width}px: ${row.label} checkbox label spans the row: ${JSON.stringify(row)}`);
+        assert(row.infoWidth > 150, `${width}px: ${row.label} has readable text width`);
+        assert(row.height < 180, `${width}px: ${row.label} does not wrap one character per line`);
+        assert(!row.overflow && row.right <= row.rowRight + 1, `${width}px: ${row.label} stays inside its row`);
+      }
+      console.log(`PASS: Git and registry review layout at ${width}px; screenshot: ${screenshot}`);
+    }
+    win.setSize(1200, 800);
+    await waitFor('window.innerWidth === 1200');
+    await click('.favorite-package-dialog input[aria-label="Include Git tooling package"]');
+    await waitFor('document.querySelector(".favorite-package-body > h3").textContent.includes("1 selected")');
+    await key('Space');
+    await waitFor('document.querySelector(".favorite-package-body > h3").textContent.includes("2 selected")');
+    console.log('PASS: package review checkbox selection works with pointer and keyboard');
     await chooseOption("Target Unity project", "Fixture");
     await waitFor('localStorage.getItem("ual:test-inspection-started") === "true"');
     await key("Escape");
