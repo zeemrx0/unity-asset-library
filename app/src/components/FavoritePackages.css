@@ -65,7 +65,8 @@
 .favorite-package-disclosure summary span { color: var(--muted); font-size: 12px; font-weight: 400; }
 .favorite-package-dialog { width: min(720px, calc(100vw - 32px)); }
 .favorite-package-body { padding: 20px; overflow-y: auto; }
-.favorite-package-choice { display: flex; grid-column: 1 / -1; gap: 12px; align-items: center; cursor: pointer; min-width: 0; }
+.favorite-package-row > .favorite-package-choice { display: flex; grid-column: 1 / -1; gap: 20px; align-items: center; cursor: pointer; min-width: 0; }
+.favorite-package-dialog .dialog-footer { display: flex; flex-wrap: wrap; gap: 12px; }
 .favorite-package-disclosure summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 640px) {
   .favorite-package-disclosure summary { padding-right: 0; }

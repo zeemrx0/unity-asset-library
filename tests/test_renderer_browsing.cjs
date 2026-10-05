@@ -599,7 +599,8 @@ app.whenReady().then(async () => {
         const rowRect = row.getBoundingClientRect();
         const choiceRect = choice.getBoundingClientRect();
         const infoRect = info.getBoundingClientRect();
-        return { label: info.querySelector('strong').textContent, rowWidth: rowRect.width, choiceWidth: choiceRect.width, infoWidth: infoRect.width, height: rowRect.height, overflow: row.scrollWidth > row.clientWidth + 1, right: infoRect.right, rowRight: rowRect.right };
+        const checkboxRect = choice.querySelector('.spring-check__press').getBoundingClientRect();
+        return { label: info.querySelector('strong').textContent, rowWidth: rowRect.width, choiceWidth: choiceRect.width, infoWidth: infoRect.width, checkboxGap: infoRect.left - checkboxRect.right, height: rowRect.height, overflow: row.scrollWidth > row.clientWidth + 1, right: infoRect.right, rowRight: rowRect.right };
       })`);
       const screenshot = path.join(os.tmpdir(), `ual-package-review-${width}.png`);
       fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG());
@@ -610,7 +611,13 @@ app.whenReady().then(async () => {
         assert(row.height < 180, `${width}px: ${row.label} does not wrap one character per line`);
         assert(!row.overflow && row.right <= row.rowRight + 1, `${width}px: ${row.label} stays inside its row`);
       }
-      console.log(`PASS: Git and registry review layout at ${width}px; screenshot: ${screenshot}`);
+      for (const row of rows) assert(row.checkboxGap >= 19, `${width}px: ${row.label} has a 20px checkbox-to-info gap`);
+      const buttonGap = await evaluate(`(() => {
+        const buttons = document.querySelectorAll('.favorite-package-dialog .dialog-footer button');
+        return buttons[1].getBoundingClientRect().left - buttons[0].getBoundingClientRect().right;
+      })()`);
+      assert(buttonGap >= 11, `${width}px: Cancel and Install have a 12px gap`);
+      console.log(`PASS: Git and registry review layout and spacing at ${width}px; screenshot: ${screenshot}`);
     }
     win.setSize(1200, 800);
     await waitFor('window.innerWidth === 1200');
