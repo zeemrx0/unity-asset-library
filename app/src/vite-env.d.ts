@@ -34,12 +34,13 @@ declare global {
   type TagChange = { action: "create" | "rename" | "delete" | "assign" | "remove"; tag: string; new_tag?: string; asset_key?: string };
   type UserTags = { tags: string[]; assignments: Record<string, string[]> };
   type UnityProject = { path: string; title: string; version: string };
-  type ImportProject = UnityProject;
-  type ImportRequest = { project: string; overwrite?: boolean; packages: { asset_key: string; file: string }[] };
-  type ImportResultRow = { file: string; status: "pending" | "preparing" | "downloading" | "ready" | "installing" | "installed" | "failed" | "cancelled"; error?: string; backup_path?: string; bytes_completed?: number | null; bytes_total?: number | null };
+  type LinkedFolder = { path: string; source: string | null; source_title: string | null };
+  type ImportProject = UnityProject & { linked_folders?: LinkedFolder[] };
+  type ImportRequest = { project: string; overwrite?: boolean; follow_links?: boolean; packages: { asset_key: string; file: string; follow_links?: boolean; clean?: boolean }[] };
+  type ImportResultRow = { file: string; status: "pending" | "preparing" | "downloading" | "ready" | "installing" | "installed" | "failed" | "cancelled"; error?: string; backup_path?: string; installed_project?: string; follow_links?: boolean; clean?: boolean; removed_folders?: string[]; bytes_completed?: number | null; bytes_total?: number | null };
   type ActionIdentity = { id: string; kind: "resync" | "cleanup" | "organize"; phase: "plan" | "apply" };
   type Preferences = { theme?: string | null; sort?: string | null; view?: string | null; filters?: Record<string, unknown> | null; action?: ActionIdentity | null };
-  type ImportJob = ProgressSnapshot & { id: string; kind: "import"; status: "queued" | "running" | "completed" | "failed" | "cancelled"; project: string; overwrite?: boolean; results: ImportResultRow[]; error?: string | null; stop_requested?: boolean };
+  type ImportJob = ProgressSnapshot & { id: string; kind: "import"; status: "queued" | "running" | "completed" | "failed" | "cancelled"; project: string; overwrite?: boolean; follow_links?: boolean; results: ImportResultRow[]; error?: string | null; stop_requested?: boolean };
   type FavoritePackage = { id: string; label: string; kind: "registry" | "git"; source: string; version: string };
   type PackageInstallRequest = { project: string; ids: string[]; overwrite?: boolean };
   type PackageInstallResult = { id: string; label: string; source: string; status: "pending" | "installing" | "installed" | "skipped" | "conflict" | "failed"; existing_spec?: string; requested_spec?: string; error?: string };

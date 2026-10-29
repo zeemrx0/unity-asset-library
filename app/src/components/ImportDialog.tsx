@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { AlertDialog, AlertDialogBackdrop, AlertDialogBody, AlertDialogContent, AlertDialogFooter, AlertDialogHeader, Button, Icon } from "./ui";
-import { ArrowDown, ArrowUp, ArrowDownUp, Check, CircleAlert, Cloud, Folder, Package, ShieldCheck, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowDownUp, Check, CircleAlert, Cloud, Folder, Link2, Package, ShieldCheck, X } from "lucide-react";
 import SpotlightCard from "./react-bits/SpotlightCard";
 import GlideSelect from "./react-bits/GlideSelect";
 import LatticeLoader from "./react-bits/LatticeLoader";
@@ -51,7 +51,7 @@ function PackageThumb({ asset, name, badge }: { asset?: Asset | null; name: stri
   </span>;
 }
 
-type ReviewRow = { id: string; assetKey: string | null; name: string; file: string };
+type ReviewRow = { id: string; assetKey: string | null; name: string; file: string; followLinks: boolean; clean: boolean };
 type ImportDialogProps = {
   assets: Asset[];
   catalog: Asset[];
@@ -72,6 +72,15 @@ function ArchiveDetails({ file, version }: { file: string; version?: AssetVersio
   </details>;
 }
 
+function LinkedFolders({ links }: { links: LinkedFolder[] }) {
+  const linked = links.filter((link) => link.source);
+  const other = links.length - linked.length;
+  return <details className="import-project-path">
+    <summary>{linked.length} folder{linked.length === 1 ? "" : "s"} linked to {[...new Set(linked.map((link) => link.source_title))].join(", ")}{other ? ` · ${other} other link${other === 1 ? "" : "s"}` : ""}</summary>
+    <ul className="import-linked-list">{links.map((link) => <li key={link.path}><code>{link.path}</code> → {link.source ? <span title={link.source}>{link.source_title}</span> : <span>not a Unity project folder (never written)</span>}</li>)}</ul>
+  </details>;
+}
+
 function ResultRow({ row, asset, name, finished, onReveal }: { row: ImportResultRow; asset?: Asset | null; name: string; finished: boolean; onReveal: (path: string) => void }) {
   const active = ["preparing", "downloading", "installing"].includes(row.status);
   const labels: Record<ImportResultRow["status"], string> = {
@@ -86,6 +95,9 @@ function ResultRow({ row, asset, name, finished, onReveal }: { row: ImportResult
       <strong>{name}</strong>
       <ArchiveDetails file={row.file} />
       {row.status === "failed" && <details className="import-error-details"><summary><span>{row.error || "The package could not be imported."}</span><small>Details</small></summary><p>{row.error || "The package could not be imported."}</p></details>}
+      {row.status === "installed" && row.installed_project && <span className="import-note"><Icon as={Link2} className="icon" aria-hidden="true" /> Installed into linked project {filename(row.installed_project)}</span>}
+      {row.status === "installed" && row.removed_folders?.length ? <span className="import-note">Clean reinstall: old {row.removed_folders.join(", ")} moved to backups. Delete them after Unity compiles without errors.</span> : null}
+      {row.status === "failed" && !row.clean && /same destination|Existing asset differs|different or unknown GUID/.test(row.error || "") && <span className="import-note">Try again with “Clean” on for this package.</span>}
       {row.backup_path && <Button type="button" className="import-backup import-text-button" onPress={() => onReveal(row.backup_path!)}>Show backups</Button>}
       {(row.status === "preparing" || row.status === "downloading") && Boolean(row.bytes_total && row.bytes_total > 0) && <div className="import-download">
         <span>{formatBytes(row.bytes_completed ?? 0)} / {formatBytes(row.bytes_total!)}</span>
@@ -101,7 +113,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
   const finished = Boolean(job && !running);
   const [order, setOrder] = useState<ReviewRow[]>(() => assets.map((asset) => {
     const versions = unityPackages(asset);
-    return { id: asset.asset_key, assetKey: asset.asset_key, name: asset.name, file: versions.length === 1 ? versions[0].file || "" : "" };
+    return { id: asset.asset_key, assetKey: asset.asset_key, name: asset.name, file: versions.length === 1 ? versions[0].file || "" : "", followLinks: true, clean: false };
   }));
   const byKey = useMemo(() => new Map(catalog.map((asset) => [asset.asset_key, asset])), [catalog]);
   const byFile = useMemo(() => new Map(catalog.flatMap((asset) => unityPackages(asset).map((version) => [version.file, asset] as const))), [catalog]);
@@ -178,11 +190,18 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
   const missing = order.filter((row) => versionsFor(row).find((version) => version.file === row.file)?.availability === "missing");
   const blocker = !order.length ? "Select at least one package" : refreshing ? "Checking package availability…" : refreshError ? "Refresh package availability to continue" : !projectPath ? "Choose a project" : inspecting ? "Checking project…" : !projectInfo || projectInfo.path !== projectPath ? "Choose a valid Unity project" : unresolved.length ? `Choose ${unresolved.length} archive version${unresolved.length === 1 ? "" : "s"}` : missing.length ? `${missing.length} archive${missing.length === 1 ? " is" : "s are"} missing` : "";
   const canStart = !blocker && !job && !starting;
+  const projectLinks = projectInfo?.path === projectPath ? projectInfo.linked_folders || [] : [];
+  const hasSourceLinks = projectLinks.some((link) => link.source);
+  const sourceNames = [...new Set(projectLinks.filter((link) => link.source).map((link) => link.source_title))].join(", ");
+  const allFollow = order.length > 0 && order.every((row) => row.followLinks);
+  function setRowLinks(ids: string[], value: boolean) {
+    setOrder((current) => current.map((item) => ids.includes(item.id) ? { ...item, followLinks: value } : item));
+  }
   async function start() {
     if (!canStart) return;
     setStarting(true);
     setActionError("");
-    try { await onStart({ project: projectPath, overwrite, packages: order.map((row) => ({ asset_key: row.assetKey!, file: row.file })) }); }
+    try { await onStart({ project: projectPath, overwrite, packages: order.map((row) => ({ asset_key: row.assetKey!, file: row.file, follow_links: hasSourceLinks && row.followLinks, ...(row.clean ? { clean: true } : {}) })) }); }
     catch (cause) { setActionError(cause instanceof Error ? cause.message : "Could not start the import."); }
     finally { setStarting(false); }
   }
@@ -224,7 +243,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
     const rows = remaining.map((result): ReviewRow => {
       const asset = byFile.get(result.file);
       const previous = order.find((row) => row.file === result.file);
-      return { id: result.file, assetKey: asset?.asset_key || previous?.assetKey || null, name: asset?.name || previous?.name || filename(result.file).replace(/\.unitypackage$/i, ""), file: result.file };
+      return { id: result.file, assetKey: asset?.asset_key || previous?.assetKey || null, name: asset?.name || previous?.name || filename(result.file).replace(/\.unitypackage$/i, ""), file: result.file, followLinks: result.follow_links ?? previous?.followLinks ?? true, clean: result.clean ?? previous?.clean ?? false };
     });
     setOrder(rows);
     setOverwrite(job.overwrite ?? true);
@@ -260,6 +279,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
             />
             <Button type="button" className="button quiet" onPress={() => void browseProject()} isDisabled={starting}>Browse…</Button>
           </div> : <div className="import-project-info"><strong>{shownProject?.title || filename(shownProjectPath)}</strong>{shownProject?.version && <span>Unity {shownProject.version}</span>}</div>}
+          {!job && projectLinks.length > 0 && <LinkedFolders links={projectLinks} />}
           {shownProjectPath && <details className="import-project-path"><summary title={shownProjectPath}>{shownProjectPath}</summary><code>{shownProjectPath}</code></details>}
           {!job && <>
             {inspecting && <p className="import-note" role="status">Checking project…</p>}
@@ -291,6 +311,8 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
                   {!selected && row.file && <span className="import-note">Previous archive: {filename(row.file)}</span>}
                 </div>
                 <div className="import-row-actions">
+                  <label className="import-row-link" title="Move this package's existing folders to backups, then install fresh. Use when a new version renames or removes files."><span>Clean</span><SquishSwitch checked={row.clean} disabled={starting} onChange={(value) => setOrder((current) => current.map((item) => item.id === row.id ? { ...item, clean: value } : item))} width={32} height={20} radius={10} ariaLabel={`Clean reinstall ${row.name}`} /></label>
+                  {hasSourceLinks && <label className="import-row-link" title={`Install into ${sourceNames} when this package's files are inside a linked folder`}><Icon as={Link2} className="icon" aria-hidden="true" /><span>Source</span><SquishSwitch checked={row.followLinks} disabled={starting} onChange={(value) => setRowLinks([row.id], value)} width={32} height={20} radius={10} ariaLabel={`Install ${row.name} into linked source project`} /></label>}
                   <span className="import-status" data-kind={!selected || availability === "missing" ? "failed" : availability === "local" ? "local" : "neutral"}>{!selected ? "Choose version" : availability === "missing" ? "Missing" : availability === "cloud_only" ? <><Icon as={Cloud} className="icon" aria-hidden="true" />Cloud</> : availability === "local" ? <><Icon as={Check} className="icon" aria-hidden="true" />Ready</> : "Unknown"}</span>
                   {reordering ? <div className="import-package-order"><Button type="button" className="icon-button" onPress={() => move(index, -1)} isDisabled={index === 0 || starting} aria-label={`Move ${row.name} up`}><Icon as={ArrowUp} className="icon" aria-hidden="true" /></Button><Button type="button" className="icon-button" onPress={() => move(index, 1)} isDisabled={index === order.length - 1 || starting} aria-label={`Move ${row.name} down`}><Icon as={ArrowDown} className="icon" aria-hidden="true" /></Button></div> : <Button type="button" className="icon-button import-remove" onPress={() => remove(row)} isDisabled={starting} aria-label={`Remove ${row.name} from import`}><Icon as={X} className="icon" aria-hidden="true" /></Button>}
                 </div>
@@ -318,6 +340,8 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
         {!job && <>
           <section className="import-policy" aria-label="Replacement policy">
             <label className="import-overwrite"><span><Icon as={ShieldCheck} className="icon" aria-hidden="true" /><strong>Replace changed assets</strong></span><SquishSwitch checked={overwrite} disabled={starting} onChange={setOverwrite} width={40} height={24} radius={12} ariaLabel="Replace changed assets" /><span className="import-toggle" aria-hidden="true">{overwrite ? "On" : "Off"}</span></label>
+            {hasSourceLinks && <label className="import-overwrite"><span><Icon as={Link2} className="icon" aria-hidden="true" /><strong>Install linked packages into source project</strong></span><SquishSwitch checked={allFollow} disabled={starting || !order.length} onChange={(value) => setRowLinks(order.map((row) => row.id), value)} width={40} height={24} radius={12} ariaLabel="Install all linked packages into source project" /><span className="import-toggle" aria-hidden="true">{allFollow ? "All" : order.some((row) => row.followLinks) ? "Some" : "Off"}</span></label>}
+            {hasSourceLinks && order.some((row) => row.followLinks) && <p className="import-note">Packages marked “Source” that sit inside linked folders update {sourceNames}. Every project that links to it gets the change. Use each package’s switch to choose.</p>}
             <div id="import-safety" className={overwrite ? "import-warning" : "import-save-note"} role="note"><Icon as={CircleAlert} className="icon" aria-hidden="true" /><p>{overwrite && <><strong>Existing assets may be replaced.</strong> Changed files are backed up.<br /></>}Save your Unity changes before importing.</p></div>
           </section>
           <span id="import-blocker" className="import-footer-note" role="status">{blocker || "Ready to import"}</span><Button ref={firstButtonRef} type="button" className="button quiet" onPress={onClose} isDisabled={starting}>Cancel</Button><Button type="button" className="button primary" onPress={() => void start()} isDisabled={!canStart} aria-describedby="import-blocker import-safety">{starting ? "Starting…" : `Import ${order.length} package${order.length === 1 ? "" : "s"}`}</Button>

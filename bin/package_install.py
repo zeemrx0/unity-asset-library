@@ -232,14 +232,54 @@ def _scan(root):
     return identities, paths
 
 
-def _plan(root, records, overwrite):
+CLEAN_OWNERSHIP = 0.8
+
+
+def _clean_roots(identities, records):
+    """Existing folders a clean reinstall moves aside: the shallowest folders that
+    share a GUID with a package folder and whose assets mostly belong to the
+    package. A shared container (e.g. Plugins) fails the ownership test, so only
+    its package-owned subfolders are considered."""
+    owned = {r["guid"] for r in records}
+    candidates = sorted({identities[r["guid"]] for r in records if r["folder"] and r["guid"] in identities},
+                        key=lambda p: (p.count("/"), p))
+    roots = []
+    for candidate in candidates:
+        if any(_within(candidate, r) for r in roots):
+            continue
+        inside = [guid for guid, path in identities.items() if _within(path, candidate)]
+        if sum(guid in owned for guid in inside) >= CLEAN_OWNERSHIP * len(inside):
+            roots.append(candidate)
+    return roots
+
+
+def _removed(rel, roots):
+    return any(_within(rel, r) or _key(rel) == _key(r + ".meta") for r in roots)
+
+
+def _plan(root, records, overwrite, clean=False):
     identities, paths = _scan(root)
+    removals, roots = [], []
+    if clean:
+        roots = _clean_roots(identities, records)
+        for rel in roots:
+            state = _snapshot(root, rel)
+            if state is None or state["kind"] != "dir":
+                raise InstallError("Clean reinstall folder is not a directory: " + rel)
+            meta = _snapshot(root, rel + ".meta")
+            removals.append({"rel": rel, "old": state})
+            if meta is not None:
+                removals.append({"rel": rel + ".meta", "old": meta})
+        # Plan as a fresh install: moved-aside assets no longer claim GUIDs or paths.
+        identities = {g: p for g, p in identities.items() if not _removed(p, roots)}
+        paths = {k: p for k, p in paths.items() if not _removed(p, roots)}
     folders = {r["path"]: identities[r["guid"]] for r in records if r["folder"] and r["guid"] in identities}
     checks, operations, directories, targets = {}, [], set(), set()
 
     def inspect(rel):
         if rel not in checks:
-            checks[rel] = _snapshot(root, rel)
+            # Paths under moved-aside folders are verified as absent after the move.
+            checks[rel] = None if _removed(rel, roots) else _snapshot(root, rel)
         return checks[rel]
 
     for record in sorted(records, key=lambda r: (not r["folder"], r["path"])):
@@ -296,7 +336,7 @@ def _plan(root, records, overwrite):
     file_paths = {_key(op["rel"]) for op in operations}
     if file_paths & {_key(p) for p in directories}:
         raise InstallError("Package contains a file/directory collision")
-    return operations, sorted(directories, key=lambda p: (p.count("/"), p)), checks
+    return operations, sorted(directories, key=lambda p: (p.count("/"), p)), checks, removals
 
 
 def _journal(root, txn, data):
@@ -365,8 +405,8 @@ def _put(root, rel, source, expected, mode=0o644):
                 os.unlink(temp, dir_fd=parent)
 
 
-def _apply(root, project, operations, directories, checks):
-    if not operations and not directories:
+def _apply(root, project, operations, directories, checks, removals=()):
+    if not operations and not directories and not removals:
         return None
     with contextlib.suppress(FileExistsError):
         os.mkdir(BACKUPS, 0o700, dir_fd=root)
@@ -379,9 +419,10 @@ def _apply(root, project, operations, directories, checks):
     finally:
         os.close(backup_fd)
     absolute = os.path.join(project, txn)
-    journal = {"status": "preparing", "directories": directories, "ops": []}
+    journal = {"status": "preparing", "directories": directories, "ops": [],
+               "removed": [{"rel": m["rel"], "backup": "removed-" + str(i)} for i, m in enumerate(removals)]}
     _journal(root, txn, journal)
-    attempted, created = [], []
+    attempted, created, moved = [], [], []
     try:
         for i, op in enumerate(operations):
             item = {k: op[k] for k in ("rel", "old", "sha")}
@@ -397,6 +438,15 @@ def _apply(root, project, operations, directories, checks):
                 if _snapshot(root, backup_rel)["sha"] != op["old"]["sha"]:
                     raise InstallError("File changed before backup: " + op["rel"])
             journal["ops"].append(item)
+        # Clean reinstall: move old folders aside (atomic rename, same filesystem).
+        for item, removal in zip(journal["removed"], removals, strict=True):
+            if _snapshot(root, item["rel"]) != removal["old"]:
+                raise InstallError("Project changed during preflight: " + item["rel"])
+            with _parent(root, item["rel"]) as (parent, name), _parent(root, txn + "/" + item["backup"]) as (dest_parent, dest_name):
+                os.rename(name, dest_name, src_dir_fd=parent, dst_dir_fd=dest_parent)
+                moved.append(item)
+                os.fsync(parent)
+                os.fsync(dest_parent)
         for rel, expected in checks.items():
             if _snapshot(root, rel) != expected:
                 raise InstallError("Project changed during preflight: " + rel)
@@ -447,6 +497,18 @@ def _apply(root, project, operations, directories, checks):
                     os.fsync(parent)
             except OSError:
                 recovery.append(rel)
+        for item in reversed(moved):
+            try:
+                with _parent(root, txn + "/" + item["backup"]) as (parent, name), _parent(root, item["rel"]) as (dest_parent, dest_name):
+                    try:
+                        os.stat(dest_name, dir_fd=dest_parent, follow_symlinks=False)
+                        raise InstallError("Original location is occupied: " + item["rel"])
+                    except FileNotFoundError:
+                        pass
+                    os.rename(name, dest_name, src_dir_fd=parent, dst_dir_fd=dest_parent)
+                    os.fsync(dest_parent)
+            except Exception:
+                recovery.append(item["rel"])
         journal["status"] = "needs_recovery" if recovery else "rolled_back"
         journal["unresolved"] = recovery
         try:
@@ -454,6 +516,8 @@ def _apply(root, project, operations, directories, checks):
         except OSError:
             pass  # The durable installing/preparing journal still blocks retries.
         raise InstallError(str(error) + ("; recovery required" if recovery else "; package changes rolled back") + ". Journal/backups: " + absolute, absolute) from error
+    if moved:
+        return absolute  # Keep the replaced folders; the user deletes them after checking Unity.
     try:
         shutil.rmtree(absolute)
     except OSError:
@@ -472,13 +536,89 @@ def _apply(root, project, operations, directories, checks):
     return None
 
 
-def install_package(project, package_path, overwrite, staging):
+def source_project(project, rel):
+    """Return the other Unity project whose Assets/<rel> a project link points to.
+    The link must keep the same Assets-relative path; anything else is None."""
+    real = os.path.realpath(os.path.join(project, rel))
+    suffix = os.sep + rel.replace("/", os.sep)
+    if not real.endswith(suffix):
+        return None
+    source = real[:-len(suffix)]
+    if (source == os.path.realpath(project) or not os.path.isdir(os.path.join(source, "Assets")) or
+            not os.path.isfile(os.path.join(source, "ProjectSettings", "ProjectVersion.txt"))):
+        return None
+    return source
+
+
+def linked_folders(project):
+    """Read-only scan for folder symlinks under Assets. source is None when the
+    link does not point to the same path inside another Unity project."""
+    links = []
+    root = os.open(project, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+    try:
+        # fwalk lists directory symlinks in dirs but never descends into them.
+        for current, dirs, _files, fd in os.fwalk("Assets", dir_fd=root, follow_symlinks=False):
+            for name in dirs:
+                if stat.S_ISLNK(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                    rel = current + "/" + name
+                    links.append({"path": rel, "source": source_project(project, rel)})
+    finally:
+        os.close(root)
+    return sorted(links, key=lambda link: link["path"])
+
+
+def _within(path, folder):
+    path, folder = _key(path), _key(folder)
+    return path == folder or path.startswith(folder + "/")
+
+
+def _route(project, records, links, follow_links):
+    """Pick the one project that receives the whole package."""
+    linked = [link for link in links if link["source"]]
+    owners, unlinked = {}, []
+    for record in records:
+        hit = next((link for link in linked if _within(record["path"], link["path"])), None)
+        if hit:
+            owners[hit["path"]] = hit["source"]
+        elif not (record["folder"] and any(_within(link["path"], record["path"]) for link in linked)):
+            unlinked.append(record["path"])  # Shared parent folders of a link are not "unlinked".
+    if not owners:
+        return project
+    folders = ", ".join(sorted(owners))
+    sources = sorted(set(owners.values()))
+    names = ", ".join(os.path.basename(source) for source in sources)
+    if not follow_links:
+        raise InstallError(folders + " is linked to " + names + ". Turn on \u201cInstall linked packages into source project\u201d to update it there.")
+    if len(sources) > 1:
+        raise InstallError("Package uses folders linked to different projects (" + names + "): " + folders)
+    if unlinked:
+        raise InstallError("Package mixes linked folder " + folders + " (source: " + names + ") with unlinked paths such as " +
+                           sorted(unlinked)[0] + ". Install it into " + sources[0] + " directly.")
+    return sources[0]
+
+
+def install_routed(project, package_path, overwrite, staging, links=(), follow_links=False, clean=False):
+    """Install into project, or into the source project of its linked folders.
+    clean moves the package's existing folders aside first (see _clean_roots);
+    the moved folders stay in the returned backup path.
+    Returns (backup_path, installed_project, removed_folders)."""
     with contextlib.ExitStack() as stack:
-        root = os.open(project, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
-        stack.callback(os.close, root)
-        assets = os.open("Assets", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root)
-        stack.callback(os.close, assets)
-        _check_recovery(root, project)
+        def open_project(path):
+            root = os.open(path, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+            stack.callback(os.close, root)
+            assets = os.open("Assets", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root)
+            stack.callback(os.close, assets)
+            _check_recovery(root, path)
+            return root
+        root = open_project(project)
         records = parse_package(package_path, staging)
-        operations, directories, checks = _plan(root, records, overwrite)
-        return _apply(root, project, operations, directories, checks)
+        target = _route(project, records, links, follow_links)
+        if target != project:
+            root = open_project(target)  # The source project gets its own recovery, backups and rollback.
+        operations, directories, checks, removals = _plan(root, records, overwrite, clean)
+        removed = [m["rel"] for m in removals if not m["rel"].endswith(".meta")]
+        return _apply(root, target, operations, directories, checks, removals), target, removed
+
+
+def install_package(project, package_path, overwrite, staging):
+    return install_routed(project, package_path, overwrite, staging)[0]

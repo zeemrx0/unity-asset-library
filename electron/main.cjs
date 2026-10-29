@@ -678,17 +678,19 @@ function startImport(request) {
   if (quitting) throw new Error("The application is quitting.");
   const guard = assertBackendRequestAllowed();
   if (!request || !Array.isArray(request.packages) || !request.packages.length || request.packages.length > 1000 ||
-      Object.keys(request).some((key) => !["project", "packages", "overwrite"].includes(key)) ||
+      Object.keys(request).some((key) => !["project", "packages", "overwrite", "follow_links"].includes(key)) ||
       (Object.hasOwn(request, "overwrite") && typeof request.overwrite !== "boolean") ||
-      request.packages.some((item) => !item || typeof item.asset_key !== "string" || !item.asset_key.trim() || typeof item.file !== "string" || !item.file.trim() || Object.keys(item).some((key) => !["asset_key", "file"].includes(key)))) throw new Error("Choose packages, exact archive versions and a target project before importing.");
+      (Object.hasOwn(request, "follow_links") && typeof request.follow_links !== "boolean") ||
+      request.packages.some((item) => !item || typeof item.asset_key !== "string" || !item.asset_key.trim() || typeof item.file !== "string" || !item.file.trim() || ["follow_links", "clean"].some((key) => Object.hasOwn(item, key) && typeof item[key] !== "boolean") || Object.keys(item).some((key) => !["asset_key", "file", "follow_links", "clean"].includes(key)))) throw new Error("Choose packages, exact archive versions and a target project before importing.");
   const project = importProjectPath(request.project);
   // Freeze the reviewed selection; the worker validates it against the index under lock.
-  const packages = request.packages.map(({ asset_key, file }) => ({ asset_key, file }));
+  const packages = request.packages.map(({ asset_key, file, follow_links, clean }) => ({ asset_key, file, ...(typeof follow_links === "boolean" ? { follow_links } : {}), ...(clean === true ? { clean } : {}) }));
   const overwrite = request.overwrite === true;
-  importJob = { id: crypto.randomUUID(), kind: "import", status: "queued", stage: "queued", project, overwrite,
+  const follow_links = request.follow_links === true;
+  importJob = { id: crypto.randomUUID(), kind: "import", status: "queued", stage: "queued", project, overwrite, follow_links,
     completed: 0, total: packages.length, current_item: null, counts: {}, started_at: Date.now() / 1000,
-    results: packages.map(({ file }) => ({ file, status: "pending" })), error: null, stop_requested: false };
-  importPromise = executeImport({ project, packages, overwrite }, guard);
+    results: packages.map(({ file, follow_links, clean }) => ({ file, status: "pending", ...(typeof follow_links === "boolean" ? { follow_links } : {}), ...(clean ? { clean } : {}) })), error: null, stop_requested: false };
+  importPromise = executeImport({ project, packages, overwrite, follow_links }, guard);
   return importSnapshot();
 }
 

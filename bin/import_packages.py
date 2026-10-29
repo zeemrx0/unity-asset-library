@@ -2,8 +2,15 @@
 """Import indexed .unitypackage files, in order, directly into a Unity project.
 
 Commands: projects; inspect --project PATH; run --request REQUEST.json
-Request: {id, repo, root, project, packages: [{asset_key, file}],
-          overwrite?: bool (default false), cancel_file?}
+Request: {id, repo, root, project, packages: [{asset_key, file, follow_links?, clean?}],
+          overwrite?: bool (default false), follow_links?: bool (default false),
+          cancel_file?}
+follow_links (per package, defaulting to the request value) installs a package
+whose paths are all under Assets folder links into the linked source Unity
+project instead (see package_install._route). The source project is locked too
+and gets its own backups and rollback. clean (per package, default false) moves
+the package's existing folders into its backup first, then installs fresh; the
+moved folders stay in backup_path for review.
 `<root>/.data/assets.json` is the authoritative index. No Unity Editor, unity
 CLI, bridge or runner takes part in `run`: files are written straight to
 Assets/ while preserving asset GUIDs and existing shared-folder identities.
@@ -18,6 +25,7 @@ package outcomes. Explicit cancellation stops the queue; project/index preflight
 and recovery safeguards remain fail-closed. completed counts installed packages.
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -35,7 +43,7 @@ import time
 import cleanup_versions as cv
 import index_assets as ia
 from progress import json_progress
-from package_install import install_package
+from package_install import install_routed, linked_folders
 
 STAGE_WINDOW = 3
 STAGE_CHUNK = 1 << 20
@@ -130,7 +138,10 @@ def _library_lock(root):
 
 def project_info(path):
     project = _norm(path)
-    return {"path": project, "title": os.path.basename(project), "version": project_version(project)}
+    version = project_version(project)
+    links = [dict(link, source_title=os.path.basename(link["source"]) if link["source"] else None)
+             for link in linked_folders(project)]
+    return {"path": project, "title": os.path.basename(project), "version": version, "linked_folders": links}
 
 
 def _archive(root, relative):
@@ -145,30 +156,35 @@ def _archive(root, relative):
 def validate_request(request):
     if not isinstance(request, dict):
         raise RequestError("Import request must be a JSON object")
-    if set(request) - {"id", "repo", "root", "project", "packages", "overwrite", "cancel_file"}:
+    if set(request) - {"id", "repo", "root", "project", "packages", "overwrite", "follow_links", "cancel_file"}:
         raise RequestError("Unsupported import request fields")
     for key in ("id", "repo", "root", "project"):
         if not isinstance(request.get(key), str) or not request[key].strip() or "\0" in request[key]:
             raise RequestError("Request requires a nonempty " + key)
     overwrite = request.get("overwrite", False)
-    if not isinstance(overwrite, bool):
-        raise RequestError("overwrite must be a boolean")
+    follow_links = request.get("follow_links", False)
+    if not isinstance(overwrite, bool) or not isinstance(follow_links, bool):
+        raise RequestError("overwrite and follow_links must be booleans")
     rows = request.get("packages")
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_PACKAGES:
         raise RequestError("Select between 1 and 1000 packages")
-    fields = {"id": request["id"], "overwrite": overwrite}
+    fields = {"id": request["id"], "overwrite": overwrite, "follow_links": follow_links}
     fields.update({key: _norm(request[key]) for key in ("repo", "root", "project")})
     fields["cancel_file"] = _norm(request["cancel_file"]) if request.get("cancel_file") is not None else None
     fields["packages"] = []
     seen = set()
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {"asset_key", "file"} or not isinstance(row.get("asset_key"), str) or not row["asset_key"].strip():
+        if (not isinstance(row, dict) or not {"asset_key", "file"} <= set(row) <= {"asset_key", "file", "follow_links", "clean"} or
+                not isinstance(row.get("asset_key"), str) or not row["asset_key"].strip()):
             raise RequestError("Each package requires an asset_key and file")
+        if not isinstance(row.get("follow_links", follow_links), bool) or not isinstance(row.get("clean", False), bool):
+            raise RequestError("follow_links and clean must be booleans")
         full = _archive(fields["root"], row.get("file"))
         if full in seen:
             raise RequestError("The same archive is selected more than once")
         seen.add(full)
-        fields["packages"].append({"asset_key": row["asset_key"], "file": os.path.normpath(row["file"])})
+        fields["packages"].append({"asset_key": row["asset_key"], "file": os.path.normpath(row["file"]),
+                                   "follow_links": row.get("follow_links", follow_links), "clean": row.get("clean", False)})
     return fields
 
 
@@ -421,15 +437,24 @@ class _Preparation:
 
 
 def run_import(fields):
-    results = [{"file": row["file"], "status": "pending", "bytes_completed": 0, "bytes_total": None}
+    results = [{"file": row["file"], "status": "pending", "bytes_completed": 0, "bytes_total": None,
+                "follow_links": row.get("follow_links", fields.get("follow_links", False)), "clean": row.get("clean", False)}
                for row in fields["packages"]]
     current = None
     completed = 0
     project = fields["project"]
     project_version(project)
     state_dir = ia.data_dir(fields["root"])
-    with ia.state_write_lock(state_dir, "import", blocking=False), \
-            _per_project_lock(project), _library_lock(fields["root"]):
+    links = linked_folders(project)
+    following = any(row.get("follow_links", fields.get("follow_links", False)) for row in fields["packages"])
+    sources = sorted({link["source"] for link in links if link["source"]}) if following else []
+    with contextlib.ExitStack() as locks:
+        locks.enter_context(ia.state_write_lock(state_dir, "import", blocking=False))
+        for path in [project] + sources:  # Sorted sources: a fixed order across concurrent imports.
+            locks.enter_context(_per_project_lock(path))
+        locks.enter_context(_library_lock(fields["root"]))
+        if linked_folders(project) != links:
+            raise RequestError("Project folder links changed while starting; review the import again")
         members = _load_index_members(state_dir)
         for row in fields["packages"]:
             if (row["asset_key"], row["file"]) not in members:
@@ -453,8 +478,13 @@ def run_import(fields):
                 _emit(fields, results, completed, current)
                 parse_dir = tempfile.mkdtemp(prefix="ual-parse-", dir=staging)
                 try:
-                    backups = install_package(project, prep.staged_path(i), fields["overwrite"], parse_dir)
+                    backups, target, removed = install_routed(project, prep.staged_path(i), fields["overwrite"], parse_dir,
+                                                              links, results[i]["follow_links"], results[i]["clean"])
+                    if removed:
+                        results[i]["removed_folders"] = removed
                     results[i]["status"] = "installed"
+                    if target != project:
+                        results[i]["installed_project"] = target
                     results[i]["bytes_completed"] = results[i]["bytes_total"]
                     if backups:
                         results[i]["backup_path"] = backups

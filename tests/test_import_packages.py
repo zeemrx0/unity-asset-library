@@ -306,6 +306,151 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
         self.assertFalse((self.project / "Assets/X").exists())
 
+    def linked_toolkit(self, link_target="Assets/Tool"):
+        toolkit = self.base / "toolkit"
+        (toolkit / "Assets/Tool").mkdir(parents=True)
+        (toolkit / "ProjectSettings").mkdir()
+        (toolkit / "ProjectSettings/ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.16f1\n")
+        (toolkit / "Assets/Tool.meta").write_text("fileFormatVersion: 2\nguid: " + "c" * 32 + "\nfolderAsset: yes\n")
+        (toolkit / "Assets/Tool/Old.txt").write_text("old")
+        (toolkit / "Assets/Tool/Old.txt.meta").write_text("fileFormatVersion: 2\nguid: " + "d" * 32 + "\n")
+        (self.project / "Assets/Tool").symlink_to(toolkit / link_target, target_is_directory=True)
+        (self.project / "Assets/Tool.meta").write_text((toolkit / "Assets/Tool.meta").read_text())
+        self.rows = [{"asset_key": "tool", "file": "Tool v2.unitypackage"}]
+        package(self.root / self.rows[0]["file"], [("c" * 32, "Assets/Tool", None), ("d" * 32, "Assets/Tool/Old.txt", b"new"),
+                                                   ("e" * 32, "Assets/Tool/Added.txt", b"added")])
+        self.index()
+        self.request["packages"] = self.rows
+        return toolkit
+
+    def test_linked_package_installs_into_source_project_when_enabled(self):
+        toolkit = self.linked_toolkit()
+        info = ip.project_info(str(self.project))
+        self.assertEqual(info["linked_folders"], [{"path": "Assets/Tool", "source": str(toolkit), "source_title": "toolkit"}])
+        before = sorted(p.name for p in (self.project / "Assets").iterdir())
+        result = ip.run_import(ip.validate_request({**self.request, "overwrite": True, "follow_links": True}))
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["results"][0]["installed_project"], str(toolkit))
+        self.assertEqual((toolkit / "Assets/Tool/Old.txt").read_text(), "new")
+        self.assertEqual((toolkit / "Assets/Tool/Added.txt").read_text(), "added")
+        self.assertTrue((self.project / "Assets/Tool").is_symlink())
+        self.assertEqual(sorted(p.name for p in (self.project / "Assets").iterdir()), before)
+        self.assertFalse((toolkit / pi.BACKUPS).exists())
+        self.assertFalse((self.project / pi.BACKUPS).exists())
+
+    def test_linked_package_fails_with_guidance_when_disabled_and_mixed_packages_never_write(self):
+        toolkit = self.linked_toolkit()
+        result = ip.run_import(ip.validate_request({**self.request, "overwrite": True}))
+        self.assertEqual(result["results"][0]["status"], "failed")
+        self.assertIn("Install linked packages into source project", result["results"][0]["error"])
+        path = self.base / "mixed.unitypackage"
+        package(path, [("e" * 32, "Assets/Tool/Added.txt", b"added"), ("f" * 32, "Assets/Plugins/X.dll", b"x")])
+        with self.assertRaisesRegex(pi.InstallError, "mixes linked folder"), tempfile.TemporaryDirectory(dir=self.base) as staging:
+            pi.install_routed(str(self.project), str(path), True, staging, pi.linked_folders(str(self.project)), True)
+        self.assertEqual((toolkit / "Assets/Tool/Old.txt").read_text(), "old")
+        self.assertFalse((toolkit / "Assets/Tool/Added.txt").exists())
+        self.assertFalse((self.project / "Assets/Plugins").exists())
+
+    def test_per_package_follow_links_overrides_request_value(self):
+        toolkit = self.linked_toolkit()
+        rows = [{**self.rows[0], "follow_links": True}]
+        fields = ip.validate_request({**self.request, "packages": rows, "overwrite": True, "follow_links": False})
+        result = ip.run_import(fields)
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["results"][0]["installed_project"], str(toolkit))
+        (toolkit / "Assets/Tool/Added.txt").write_text("edited")
+        rows = [{**self.rows[0], "follow_links": False}]
+        result = ip.run_import(ip.validate_request({**self.request, "packages": rows, "overwrite": True, "follow_links": True}))
+        self.assertEqual(result["results"][0]["status"], "failed")
+        self.assertEqual((toolkit / "Assets/Tool/Added.txt").read_text(), "edited")
+        with self.assertRaises(ip.RequestError):
+            ip.validate_request({**self.request, "packages": [{**self.rows[0], "follow_links": "yes"}]})
+
+    def soap_upgrade(self):
+        """Old layout Assets/Soap (folder L renamed to C upstream, new L added),
+        a stale file absent from the new version, and an unrelated asset."""
+        def meta(guid, folder=False):
+            return "fileFormatVersion: 2\nguid: " + guid + "\n" + ("folderAsset: yes\n" if folder else "")
+        assets = self.project / "Assets"
+        for rel, guid, folder, data in [("Soap", "1" * 32, True, None), ("Soap/Editor", "2" * 32, True, None),
+                                        ("Soap/Editor/Lists", "3" * 32, True, None), ("Soap/Editor/Lists/A.cs", "4" * 32, False, "old a"),
+                                        ("Soap/Editor/Stale.cs", "5" * 32, False, "stale"), ("Mine.txt", "9" * 32, False, "mine")]:
+            path = assets / rel
+            path.mkdir() if folder else path.write_text(data)
+            (assets / (rel + ".meta")).write_text(meta(guid, folder))
+        new = [("1" * 32, "Assets/Obvious/Soap", None), ("2" * 32, "Assets/Obvious/Soap/Editor", None),
+               ("3" * 32, "Assets/Obvious/Soap/Editor/Collections", None), ("4" * 32, "Assets/Obvious/Soap/Editor/Collections/A.cs", b"new a"),
+               ("6" * 32, "Assets/Obvious/Soap/Editor/Lists", None), ("7" * 32, "Assets/Obvious/Soap/Editor/Lists/B.cs", b"new b")]
+        path = self.base / "soap.unitypackage"
+        package(path, new)
+        return path
+
+    def test_clean_reinstall_replaces_renamed_layout_and_keeps_old_folder_in_backup(self):
+        path = self.soap_upgrade()
+        with tempfile.TemporaryDirectory(dir=self.base) as staging, self.assertRaisesRegex(pi.InstallError, "same destination"):
+            pi.install_routed(str(self.project), str(path), True, staging)
+        with tempfile.TemporaryDirectory(dir=self.base) as staging:
+            backup, target, removed = pi.install_routed(str(self.project), str(path), True, staging, clean=True)
+        assets = self.project / "Assets"
+        self.assertEqual(removed, ["Assets/Soap"])
+        self.assertFalse((assets / "Soap").exists())
+        self.assertFalse((assets / "Soap.meta").exists())
+        self.assertEqual((assets / "Obvious/Soap/Editor/Collections/A.cs").read_text(), "new a")
+        self.assertIn("4" * 32, (assets / "Obvious/Soap/Editor/Collections/A.cs.meta").read_text())
+        self.assertEqual((assets / "Obvious/Soap/Editor/Lists/B.cs").read_text(), "new b")
+        self.assertEqual((assets / "Mine.txt").read_text(), "mine")
+        self.assertEqual((Path(backup) / "removed-0/Editor/Stale.cs").read_text(), "stale")
+        self.assertTrue((Path(backup) / "removed-1").is_file())
+        self.assertEqual(json.loads((Path(backup) / "journal.json").read_text())["status"], "complete")
+        # A completed clean journal must not block the next import.
+        self.install([("8" * 32, "Assets/Next.txt", b"next")])
+
+    def test_clean_reinstall_rolls_back_moved_folder_on_failure(self):
+        path = self.soap_upgrade()
+        original = pi._put
+        def fail(root, rel, source, expected, mode=0o644):
+            if rel.endswith("B.cs"):
+                raise OSError("disk full")
+            return original(root, rel, source, expected, mode)
+        with patch.object(pi, "_put", side_effect=fail), tempfile.TemporaryDirectory(dir=self.base) as staging, \
+                self.assertRaisesRegex(pi.InstallError, "rolled back"):
+            pi.install_routed(str(self.project), str(path), True, staging, clean=True)
+        assets = self.project / "Assets"
+        self.assertEqual((assets / "Soap/Editor/Lists/A.cs").read_text(), "old a")
+        self.assertEqual((assets / "Soap/Editor/Stale.cs").read_text(), "stale")
+        self.assertTrue((assets / "Soap.meta").is_file())
+        self.assertFalse((assets / "Obvious/Soap").exists())
+
+    def test_clean_reinstall_never_moves_shared_folders(self):
+        assets = self.project / "Assets"
+        (assets / "Plugins").mkdir()
+        (assets / "Plugins.meta").write_text("fileFormatVersion: 2\nguid: " + "a" * 32 + "\nfolderAsset: yes\n")
+        for i in range(3):
+            (assets / f"Plugins/Other{i}.dll").write_text("other")
+            (assets / f"Plugins/Other{i}.dll.meta").write_text("fileFormatVersion: 2\nguid: " + str(i) * 32 + "\n")
+        (assets / "Plugins/Tool.dll").write_text("old")
+        (assets / "Plugins/Tool.dll.meta").write_text("fileFormatVersion: 2\nguid: " + "b" * 32 + "\n")
+        with tempfile.TemporaryDirectory(dir=self.base) as staging:
+            _backup, _target, removed = pi.install_routed(str(self.project), self._pkg(
+                [("a" * 32, "Assets/Plugins", None), ("b" * 32, "Assets/Plugins/Tool.dll", b"new")]), True, staging, clean=True)
+        self.assertEqual(removed, [])
+        self.assertEqual((assets / "Plugins/Tool.dll").read_text(), "new")
+        self.assertEqual((assets / "Plugins/Other0.dll").read_text(), "other")
+
+    def _pkg(self, assets):
+        path = self.base / "p.unitypackage"
+        package(path, assets)
+        return str(path)
+
+    def test_links_to_other_paths_are_never_followed(self):
+        toolkit = self.linked_toolkit(link_target="Assets")  # Assets/Tool -> toolkit/Assets: different relative path.
+        self.assertEqual(pi.linked_folders(str(self.project)), [{"path": "Assets/Tool", "source": None}])
+        result = ip.run_import(ip.validate_request({**self.request, "overwrite": True, "follow_links": True}))
+        self.assertEqual(result["results"][0]["status"], "failed")
+        self.assertIn("link or special file", result["results"][0]["error"])
+        self.assertEqual((toolkit / "Assets/Tool/Old.txt").read_text(), "old")
+        self.assertFalse((toolkit / "Assets/Old.txt").exists())
+
     def test_failure_rolls_back_own_files_without_losing_originals(self):
         self.install([("a" * 32, "Assets/A", b"old")])
         original = pi._put
@@ -413,14 +558,14 @@ class ImportTests(unittest.TestCase):
 
     def test_stop_after_failed_package_preserves_error_and_cancels_remaining(self):
         (self.root / self.rows[1]["file"]).write_bytes(b"invalid")
-        original = ip.install_package
+        original = ip.install_routed
         def stop_on_failure(*args):
             try:
                 return original(*args)
             except Exception:
                 Path(self.request["cancel_file"]).touch()
                 raise
-        with patch.object(ip, "install_package", side_effect=stop_on_failure):
+        with patch.object(ip, "install_routed", side_effect=stop_on_failure):
             result = self.run_queue()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["completed"], 1)
@@ -430,12 +575,12 @@ class ImportTests(unittest.TestCase):
 
 
     def test_stop_after_current_even_if_next_package_is_ready(self):
-        original = ip.install_package
+        original = ip.install_routed
         def stop(*args):
             result = original(*args)
             Path(self.request["cancel_file"]).touch()
             return result
-        with patch.object(ip, "install_package", side_effect=stop):
+        with patch.object(ip, "install_routed", side_effect=stop):
             result = self.run_queue()
         self.assertEqual(result["status"], "cancelled")
         self.assertEqual([r["status"] for r in result["results"]], ["installed", "cancelled", "cancelled"])
