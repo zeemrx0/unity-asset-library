@@ -121,7 +121,6 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
   const [projectsError, setProjectsError] = useState("");
   const [projectPath, setProjectPath] = useState("");
   const [projectInfo, setProjectInfo] = useState<ImportProject | null>(null);
-  const [editingProject, setEditingProject] = useState(true);
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState("");
   // Replacement is intentionally enabled; the warning stays visible before consent.
@@ -165,7 +164,6 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
       if (epoch !== inspectEpochRef.current) return;
       setProjectInfo(info);
       setProjectPath(info.path);
-      setEditingProject(false);
     } catch (cause) {
       if (epoch !== inspectEpochRef.current) return;
       setProjectInfo(null);
@@ -268,8 +266,8 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
       </AlertDialogHeader>
       <AlertDialogBody className="import-body" ref={bodyRef}>
         <SpotlightCard className="import-project-card" role="region" aria-label="Target project">
-          <div className="import-section-heading"><h3><Icon as={Folder} className="icon" aria-hidden="true" /> Target project</h3>{!job && projectInfo && <Button type="button" className="import-text-button" onPress={() => setEditingProject(!editingProject)} isDisabled={starting}>{editingProject ? "Keep project" : "Change"}</Button>}</div>
-          {!job && editingProject ? <div className="import-project-row">
+          <div className="import-section-heading"><h3><Icon as={Folder} className="icon" aria-hidden="true" /> Target project</h3></div>
+          {!job ? <div className="import-project-row">
             <GlideSelect className="import-project-select" value={projectPath} disabled={starting} ariaLabel="Unity Hub project"
               placeholder={projects === null ? "Loading projects…" : "Choose a Unity project…"}
               options={[
