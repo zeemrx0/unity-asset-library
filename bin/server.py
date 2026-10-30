@@ -143,8 +143,11 @@ class ViewerService:
             raise SafetyError("backend repository identity does not match configuration")
         self.root = os.path.abspath(cfg["vault_root"])
         self.instance_id = str(instance_id or secrets.token_hex(16))
-        # All persistent user-side data lives in the vault's .data directory.
-        self.state = storage._ensure_data_dir(self.root)
+        # Machine-local state; user data resolves through ia.user_path.
+        try:
+            self.state = storage.ensure_state_dir(self.root)
+        except storage.StorageError as exc:
+            raise SafetyError(str(exc)) from exc
         self.bin_dir = os.path.join(self.repo, "bin")
         self.resolve_py = os.path.join(self.bin_dir, "resolve_store.py")
         self.index_py = os.path.join(self.bin_dir, "index_assets.py")
@@ -497,7 +500,7 @@ class ViewerService:
 
     # -- favorites ----------------------------------------------------------
     def _favorites_path(self):
-        return os.path.join(self.state, "favorites.json")
+        return ia.user_path(self.state, "favorites.json")
 
     def _read_favorites(self):
         """Stored asset_key list. A missing file is empty; a corrupt one is an

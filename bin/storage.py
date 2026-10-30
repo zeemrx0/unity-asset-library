@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Storage configuration and crash-safe index rebuilds for the asset library.
 
-All persistent user-side data lives in the chosen library at <vault>/.data
-(flat state JSON, reports, recovery journal, locks, preferences). The repo's
-config.json is only the agreed exception: the last-opened-library pointer.
-Legacy repo state/ is copied
-into .data once (gated by a durable completion marker), never overwritten,
-and never deleted.
+Two roots. User data that must follow the library (tags, favorites, package
+favorites, overrides, package identities and store-id matches) lives in
+<vault>/.data. Everything else (store cache, generated index and reports,
+preferences, recovery journal, locks) is per machine in the application's
+data directory, one state directory per library (index_assets.app_state_dir).
+The state directory's library.json binds it to its vault. The repo's
+config.json is only the last-opened-library pointer.
+Legacy repo state/ is copied into the state directory once (gated by a durable
+completion marker), never overwritten, and never deleted. Machine-local files
+found in an older <vault>/.data are moved into the state directory once.
 
 Package identity and annotation cutovers share the recovery journal so a failed
 rebuild cannot detach user data. Ambiguous legacy groups retain shared user
@@ -24,6 +28,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -34,20 +39,29 @@ import index_assets as ia  # noqa: E402
 import resolve_store  # noqa: E402
 from progress import json_progress  # noqa: E402
 
-API_VERSION = 7
+API_VERSION = 8
 JOURNAL_NAME = "storage-journal.json"
 JOURNAL_VERSION = 1
 DATA_DIR_NAME = ".data"
 _INSTANCE_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _TXN_RE = re.compile(r"^[0-9a-f]{32}$")
 _ALLOWED = ("assets", "pending", "review", "meta", "csv", "config",
-            "identities", "tags", "favorites", "cache", "overrides", "identity-backup")
+            "identities", "tags", "favorites", "cache", "overrides", "identity-backup",
+            "matches")
 
 # Existing destination files win; migration keeps the old files as a recovery backup.
 _LEGACY_MIGRATABLE = ("assets.json", "cache.json", "overrides.json", "user_tags.json",
                       "pending-enrichment.json", "review-queue.md", "index-meta.json",
                       "favorites.json", "preferences.json", "search-worklist.json", "CHANGES.md")
 MIGRATION_MARKER = "legacy-migrated.json"
+VAULT_MIGRATION_MARKER = "vault-migrated.json"
+# Machine-local files an older layout kept in <vault>/.data. Lock files are
+# dropped; any other unknown entry is archived under legacy/.
+_VAULT_MACHINE_FILES = ("assets.json", "assets.csv", "cache.json", "review-queue.md",
+                        "pending-enrichment.json", "CHANGES.md", "index-meta.json",
+                        "config.json", "preferences.json", "search-worklist.json",
+                        "identity-migration-backup.json", MIGRATION_MARKER, JOURNAL_NAME)
+_VAULT_LOCKS = ("state-write.lock", "cache-write.lock", "server-instance.lock")
 
 
 class StorageError(RuntimeError):
@@ -100,6 +114,115 @@ def _ensure_data_dir(root):
     except OSError as exc:
         raise StorageError(f"library data directory is not writable: {target}") from exc
     return target
+
+
+def ensure_state_dir(root):
+    """This machine's state directory for a library, created and bound on use.
+
+    Also ensures the vault's user-data directory exists and moves files an
+    older layout kept in <vault>/.data into the state directory once.
+    """
+    root = os.path.realpath(os.path.abspath(root))
+    _ensure_data_dir(root)
+    state = ia.app_state_dir(root)
+    binding = os.path.join(state, ia.BINDING_NAME)
+    try:
+        os.makedirs(state, exist_ok=True)
+        if not os.path.exists(binding):
+            _write_json(binding, {"vault_root": root})
+    except OSError as exc:
+        raise StorageError(f"application data directory is not writable: {state}") from exc
+    try:
+        with open(binding, encoding="utf-8") as fh:
+            bound = json.load(fh).get("vault_root")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise StorageError(f"library binding is unreadable: {binding}") from exc
+    if not isinstance(bound, str) or os.path.realpath(bound) != root:
+        raise StorageError(f"application data directory belongs to another library: {state}")
+    _migrate_vault_state(root, state)
+    return state
+
+
+def _same_file(a, b):
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def _migrate_vault_state(root, state):
+    """Move machine-local files from an older <vault>/.data into `state`.
+
+    Copy first, write a durable marker, then delete each vault copy only when
+    its state-directory copy is identical (files) or present (directories).
+    Rerunning after a crash finishes the deletion; files already in `state`
+    always win.
+    """
+    vault = data_dir(root)
+    marker = os.path.join(state, VAULT_MIGRATION_MARKER)
+    plan = []
+    try:
+        names = sorted(os.listdir(vault))
+    except OSError as exc:
+        raise StorageError(f"library data directory is unreadable: {vault}") from exc
+    for name in names:
+        if name in ia.USER_FILES:
+            continue
+        if name in _VAULT_LOCKS:
+            plan.append((name, None))
+        elif name in _VAULT_MACHINE_FILES:
+            plan.append((name, os.path.join(state, name)))
+        else:
+            plan.append((name, os.path.join(state, "legacy", name)))
+    if not plan:
+        return False
+    try:
+        lock = _lock(os.path.join(vault, "server-instance.lock"), blocking=False)
+        lock.__enter__()
+    except StorageError as exc:
+        if os.path.exists(marker):
+            return False
+        raise StorageError("an older app version is using this library; close it and retry") from exc
+    try:
+        moved = []
+        if not os.path.exists(marker):
+            for name, dst in plan:
+                src = os.path.join(vault, name)
+                if dst is None or os.path.lexists(dst) or os.path.islink(src):
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst + ".partial", dirs_exist_ok=True)
+                    os.replace(dst + ".partial", dst)
+                else:
+                    shutil.copy2(src, dst + ".partial")
+                    os.replace(dst + ".partial", dst)
+                moved.append(name)
+            _write_json(marker, {"complete": True, "moved": moved})
+        for name, dst in plan:
+            src = os.path.join(vault, name)
+            if name == "server-instance.lock" or not os.path.lexists(src):
+                continue
+            if dst is None:
+                _remove(src)
+            elif os.path.isdir(src) and not os.path.islink(src):
+                if os.path.isdir(dst):
+                    shutil.rmtree(src)
+            elif _same_file(src, dst):
+                _remove(src)
+    except OSError as exc:
+        raise StorageError(f"could not move machine-local files out of {vault}: {exc}") from exc
+    finally:
+        lock.__exit__(None, None, None)
+    _remove(os.path.join(vault, "server-instance.lock"))
+    # Seed store-id matches so another machine can rebuild by id.
+    matches_path = ia.user_path(state, "matches.json")
+    if not os.path.exists(matches_path) and os.path.exists(os.path.join(state, "cache.json")):
+        matches = resolve_store.matches_from(_read_cache(state))
+        if matches:
+            _write_json(matches_path, resolve_store.matches_payload(matches))
+    return True
 
 
 def _config_path(repo):
@@ -239,12 +362,13 @@ def _targets(state):
         "meta": os.path.join(state, "index-meta.json"),
         "csv": os.path.join(state, "assets.csv"),
         "config": os.path.join(state, "config.json"),
-        "identities": os.path.join(state, "identities.json"),
-        "tags": os.path.join(state, "user_tags.json"),
-        "favorites": os.path.join(state, "favorites.json"),
+        "identities": ia.user_path(state, "identities.json"),
+        "tags": ia.user_path(state, "user_tags.json"),
+        "favorites": ia.user_path(state, "favorites.json"),
         "cache": os.path.join(state, "cache.json"),
-        "overrides": os.path.join(state, "overrides.json"),
+        "overrides": ia.user_path(state, "overrides.json"),
         "identity-backup": os.path.join(state, "identity-migration-backup.json"),
+        "matches": ia.user_path(state, "matches.json"),
     }
 
 
@@ -252,9 +376,11 @@ def _entry_paths(state, txn, name):
     if name not in _ALLOWED:
         raise StorageError("unsafe storage transaction entry")
     target = _targets(state)[name]
+    # Stage and backup beside the target: os.replace must stay on one volume.
+    folder = os.path.dirname(target)
     return (target,
-            os.path.join(state, f".storage-stage-{txn}-{name}"),
-            os.path.join(state, f".storage-backup-{txn}-{name}"))
+            os.path.join(folder, f".storage-stage-{txn}-{name}"),
+            os.path.join(folder, f".storage-backup-{txn}-{name}"))
 
 
 def _legacy_output_dir(repo, output_rel):
@@ -369,7 +495,7 @@ def ensure_migrated(repo, cfg):
     if not os.path.isdir(legacy):
         return False
     root = _canonical_root(cfg["vault_root"])
-    state = _ensure_data_dir(root)
+    state = ensure_state_dir(root)
     marker = os.path.join(state, MIGRATION_MARKER)
     if os.path.exists(marker):
         return False
@@ -382,7 +508,8 @@ def ensure_migrated(repo, cfg):
             output = _legacy_output_dir(repo, old_cfg.get("output_dir", "."))
             sources.append(("assets.csv", os.path.join(output, "assets.csv")))
             for name, src in sources:
-                dst = os.path.join(state, name)
+                dst = (ia.user_path(state, name) if name in ia.USER_FILES
+                       else os.path.join(state, name))
                 if not os.path.isfile(src) or os.path.lexists(dst):
                     continue
                 try:
@@ -416,7 +543,7 @@ def recover_startup(repo=None):
         try:
             root = _canonical_root(cfg["vault_root"])
             _reject_workspace_overlap(root, repo)
-            state = _ensure_data_dir(root)
+            state = ensure_state_dir(root)
         except StorageError:
             state = _legacy_state(repo)
     if os.path.exists(_journal_path(state)):
@@ -449,7 +576,10 @@ def status(repo=None):
     except StorageError as exc:
         raw = cfg.get("vault_root") if isinstance(cfg, dict) else None
         return _state_payload(repo, path=raw, ready=False, needs_setup=False, error=str(exc))
-    state = _ensure_data_dir(root)
+    try:
+        state = ensure_state_dir(root)
+    except StorageError as exc:
+        return _state_payload(repo, path=root, ready=False, needs_setup=False, error=str(exc))
     # A live server owns this lock. It is safe to read its stable state, but
     # recovery must wait until the owner has exited.
     try:
@@ -507,7 +637,7 @@ def prepare_index(state, scanned, progress=None):
     changes = ia.asset_identity.rekeys(previous, data)
     cache = _read_cache(state)
     overrides = {}
-    overrides_path = os.path.join(state, "overrides.json")
+    overrides_path = ia.user_path(state, "overrides.json")
     if os.path.exists(overrides_path):
         try:
             with open(overrides_path, encoding="utf-8") as fh:
@@ -521,7 +651,7 @@ def prepare_index(state, scanned, progress=None):
     snapshots = {"identities": ia.asset_identity.snapshot(data, identities)}
     if changes:
         favorites = {"favorites": []}
-        favorites_path = os.path.join(state, "favorites.json")
+        favorites_path = ia.user_path(state, "favorites.json")
         if os.path.exists(favorites_path):
             try:
                 with open(favorites_path, encoding="utf-8") as fh:
@@ -550,6 +680,15 @@ def prepare_index(state, scanned, progress=None):
         overrides = ia.asset_identity.migrate_keyed(overrides, changes)
         if os.path.exists(overrides_path):
             snapshots["overrides"] = overrides
+    try:
+        previous_matches = resolve_store.load_matches(state)
+    except ValueError as exc:
+        raise StorageError(str(exc)) from exc
+    if changes:
+        previous_matches = ia.asset_identity.migrate_keyed(previous_matches, changes)
+    matches = resolve_store.matches_from(cache, previous_matches)
+    if matches != previous_matches or (changes and previous_matches):
+        snapshots["matches"] = resolve_store.matches_payload(matches)
     data = resolve_store.merge(data, cache, overrides)
     for asset in data["assets"]:
         asset["tags"] = sorted(tags["assignments"].get(asset["asset_key"], []))
@@ -627,7 +766,7 @@ def configure(repo=None, root=None, instance_id=None, progress=False):
         raise StorageError("instance id is invalid")
     selected = _canonical_root(root)
     _reject_workspace_overlap(selected, repo)
-    state = _ensure_data_dir(selected)
+    state = ensure_state_dir(selected)
     # The shared transaction helper supplies its own recovery token.
     progress_cb = json_progress if progress else None
     with _lock(os.path.join(state, "server-instance.lock"), blocking=False):

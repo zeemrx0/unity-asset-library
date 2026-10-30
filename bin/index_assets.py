@@ -13,7 +13,9 @@ resolved absolute path, never by name.
 
 The vault root comes from ../config.json ("vault_root"); --root overrides it for
 one run and --state relocates the state directory (tests pass both to sandbox).
-State lives in the vault's .data/ directory, never in the tool repo.
+User data (tags, favorites, overrides, identities, store-id matches) lives in the
+vault's .data/; the index, cache and reports live in this machine's app data
+(see app_state_dir), never in the tool repo.
 review-queue.md are generated outputs; React/Electron is the supported viewer.
 
 Stable family ownership is maintained by asset_identity; titles are discovery
@@ -24,7 +26,7 @@ without additional provenance. Pending enrichment is derived by pending_queue,
 so deleting its generated queue never discards unresolved work.
 
 Usage:
-    python3 index_assets.py scan          # write <library>/.data/assets.json
+    python3 index_assets.py scan          # write <app data>/libraries/<id>/assets.json
     python3 index_assets.py emit          # write assets.csv + review-queue.md
     python3 index_assets.py scan emit
 """
@@ -32,6 +34,7 @@ Usage:
 import contextlib
 import fcntl
 import argparse
+import hashlib
 import csv
 import json
 import os
@@ -850,16 +853,61 @@ def repo_dir():
     return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 
 
-def state_dir():
-    """All user-side state lives in the configured vault's .data directory."""
-    return data_dir(load_config()["vault_root"])
+# Two storage roots. User data follows the library through the vault's .data
+# directory; store cache, generated outputs, preferences and locks stay in this
+# machine's application data, one directory per library.
+APP_DATA_ENV = "UAL_APP_DATA"
+BINDING_NAME = "library.json"
+USER_FILES = ("favorites.json", "package_favorites.json", "user_tags.json",
+              "overrides.json", "identities.json", "matches.json")
+
+
+def state_dir(root=None):
+    """This machine's state directory for a library (default: last-opened)."""
+    import storage
+    return storage.ensure_state_dir(root or load_config()["vault_root"])
 
 
 def data_dir(root):
+    """The vault-side user-data directory of a library."""
     target = os.path.join(os.path.abspath(root), ".data")
     if os.path.islink(target) or (os.path.exists(target) and not os.path.isdir(target)):
         raise ValueError(f"library data directory must be a real directory: {target}")
     return target
+
+
+def app_data_root():
+    value = os.environ.get(APP_DATA_ENV)
+    if value:
+        return os.path.abspath(value)
+    return os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                        "Unity Asset Index")
+
+
+def app_state_dir(root):
+    """Per-machine state directory for one library, keyed by its real path."""
+    real = os.path.realpath(os.path.abspath(root))
+    library_id = hashlib.sha256(real.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(app_data_root(), "libraries", library_id)
+
+
+def user_path(state, name):
+    """Location of a user-data file for a state directory.
+
+    An application state directory carries a library binding and keeps user
+    data in that library's .data. A directory without a binding (the vault's
+    own .data, or a sandboxed test state) holds every file itself.
+    """
+    if name not in USER_FILES:
+        raise ValueError(f"not a user-data file: {name}")
+    try:
+        with open(os.path.join(state, BINDING_NAME), encoding="utf-8") as fh:
+            root = json.load(fh)["vault_root"]
+    except FileNotFoundError:
+        return os.path.join(state, name)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"library binding is unreadable: {state}") from exc
+    return os.path.join(data_dir(root), name)
 
 
 def load_config():
@@ -876,7 +924,7 @@ def main(argv=None, state_lock_held=False, scanned=None, progress=None):
     probe.add_argument("--state-lock-held", action="store_true")
     probe_args, _ = probe.parse_known_args(argv)
     held = state_lock_held or probe_args.state_lock_held
-    index_dir = os.path.abspath(probe_args.state) if probe_args.state else data_dir(probe_args.root) if probe_args.root else state_dir()
+    index_dir = os.path.abspath(probe_args.state) if probe_args.state else state_dir(probe_args.root)
     import storage
     import resolve_store
     try:
@@ -895,7 +943,7 @@ def _main_unlocked(argv=None, scanned=None, progress=None):
     ap.add_argument("--root", default=None,
                     help="vault root override (default: config.json vault_root)")
     ap.add_argument("--state", default=None,
-                    help="state dir override (default: selected library .data/)")
+                    help="state dir override (default: this machine's state for the library)")
     ap.add_argument("--state-lock-held", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--progress-json", action="store_true",
                     help="emit machine-readable progress events")
@@ -905,7 +953,7 @@ def _main_unlocked(argv=None, scanned=None, progress=None):
 
     cfg = {} if args.root else load_config()
     root = os.path.abspath(args.root) if args.root else cfg["vault_root"]
-    index_dir = os.path.abspath(args.state) if args.state else data_dir(root)
+    index_dir = os.path.abspath(args.state) if args.state else state_dir(root)
     assets_json = os.path.join(index_dir, "assets.json")
     import storage
     import pending_queue

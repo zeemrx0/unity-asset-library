@@ -22,6 +22,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
+# Never touch this machine's real application data.
+os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 
 import index_assets as ia  # noqa: E402
 import cleanup_versions as cv  # noqa: E402
@@ -76,7 +78,7 @@ class Harness:
         repo = self._tmp.name
         self.vault = os.path.join(repo, "vault")
         self.static = os.path.join(repo, "static")
-        self.state = os.path.join(self.vault, ".data")
+        self.state = ia.app_state_dir(self.vault)
         for path in (self.vault, self.static, self.state):
             os.makedirs(path)
         # Two real archives: plan fingerprints lstat them.
@@ -204,7 +206,7 @@ class StateLockContentionTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = self._tmp.name
         self.root = os.path.join(self.repo, "vault")
-        self.state = os.path.join(self.root, ".data")
+        self.state = ia.app_state_dir(self.root)
         self.static = os.path.join(self.repo, "static")
         for path in (self.root, self.static, self.state):
             os.makedirs(path)
@@ -1130,7 +1132,9 @@ class FavoritesTest(unittest.TestCase):
         self.assertEqual(self.get_favorites(), (200, {"favorites": []}))
 
     def test_corrupt_store_surfaces_error_and_is_not_overwritten(self):
-        path = os.path.join(self.h.state, "favorites.json")
+        # Favorites are user data: they live in the library's .data, not app state.
+        path = os.path.join(self.h.vault, ".data", "favorites.json")
+        self.assertFalse(os.path.exists(os.path.join(self.h.state, "favorites.json")))
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         status, body = self.get_favorites()

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -10,6 +11,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
+# Never touch this machine's real application data.
+os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 spec = importlib.util.spec_from_file_location("favorite_install", ROOT / "bin" / "install_favorite_packages.py")
 assert spec is not None and spec.loader is not None
 installer = importlib.util.module_from_spec(spec)

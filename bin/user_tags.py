@@ -49,7 +49,7 @@ def normalize(tag):
 
 
 def store_path(state_dir):
-    return os.path.join(state_dir, STORE_NAME)
+    return _index_assets().user_path(state_dir, STORE_NAME)
 
 
 def _validate(data):

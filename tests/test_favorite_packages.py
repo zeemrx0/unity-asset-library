@@ -34,7 +34,7 @@ class FavoritePackagesTest(unittest.TestCase):
 
     def test_duplicate_and_corrupt_store_never_overwrite_saved_data(self):
         self.post("/api/package-favorites/save", {"package": self.package})
-        path = os.path.join(self.h.state, favorite_packages.STORE_NAME)
+        path = os.path.join(self.h.vault, ".data", favorite_packages.STORE_NAME)
         with open(path, "rb") as stream:
             original = stream.read()
         duplicate = {**self.package, "id": "duplicate"}

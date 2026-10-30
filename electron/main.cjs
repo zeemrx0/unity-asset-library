@@ -12,7 +12,7 @@ app.setPath("userData", path.join(app.getPath("appData"), app.isPackaged ? "Unit
 
 let backendPort = 8765;
 const SERVICE = "unity-asset-library";
-const API_VERSION = 7;
+const API_VERSION = 8;
 const { resolvePort } = require("./port-recovery.cjs");
 let backendProcess = null;
 let ownsBackend = false;
@@ -219,6 +219,12 @@ function pythonCommand() {
     : (process.platform === "win32" ? "python" : "python3"));
 }
 
+// Machine-local library state (store cache, index, preferences, locks) lives
+// under userData; user data stays in the library's .data folder.
+function pythonEnv() {
+  return { ...process.env, PYTHONUNBUFFERED: "1", PYTHONDONTWRITEBYTECODE: "1", UAL_APP_DATA: app.getPath("userData") };
+}
+
 function newInstanceId() {
   return crypto.randomUUID();
 }
@@ -242,7 +248,7 @@ function runPythonCli(args, onProgress, cwd = args[args.indexOf("--repo") + 1]) 
     try {
       child = spawn(pythonCommand(), args, {
         cwd,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONDONTWRITEBYTECODE: "1" },
+        env: pythonEnv(),
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
@@ -329,7 +335,7 @@ async function launchOwnedBackend(root, vaultRoot) {
   const script = path.join(root, "bin", "server.py");
   backendOutput.length = 0;
   const child = spawn(pythonCommand(), [script, "--repo", root, "--port", String(backendPort), "--instance-id", instanceId], {
-    env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONDONTWRITEBYTECODE: "1" },
+    env: pythonEnv(),
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });

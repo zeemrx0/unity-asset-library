@@ -4,7 +4,6 @@ Independent of indexed asset stars; rescanning never changes these entries.
 Callers hold the shared state-write lock when mutating.
 """
 import json
-import os
 import re
 from urllib.parse import urlsplit
 
@@ -48,7 +47,7 @@ def normalize_package(package):
 
 def load(state):
     try:
-        with open(os.path.join(state, STORE_NAME), encoding="utf-8") as stream:
+        with open(ia.user_path(state, STORE_NAME), encoding="utf-8") as stream:
             data = json.load(stream)
     except FileNotFoundError:
         return {"packages": []}
@@ -91,5 +90,5 @@ def mutate(state, action, package=None, package_id=None, ids=None):
         data["packages"] = [by_id[item] for item in ids]
     else:
         raise ValueError("Unknown saved-package action")
-    ia.write_atomic(os.path.join(state, STORE_NAME), json.dumps(data, indent=1))
+    ia.write_atomic(ia.user_path(state, STORE_NAME), json.dumps(data, indent=1))
     return data

@@ -38,7 +38,8 @@ def initial_key(parsed):
 
 
 def load(state):
-    path = os.path.join(state, "identities.json")
+    from index_assets import user_path
+    path = user_path(state, "identities.json")
     try:
         with open(path, encoding="utf-8") as fh:
             value = json.load(fh)

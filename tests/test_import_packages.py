@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+# Never touch this machine's real application data.
+os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 import import_packages as ip
 import package_install as pi
 
@@ -42,8 +44,8 @@ class ImportTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
         self.root, self.project = self.base / "library", self.base / "project"
-        self.state = self.root / ".data"
-        for folder in (self.state, self.project / "Assets", self.project / "ProjectSettings"):
+        self.state = Path(ip.ia.app_state_dir(self.root))
+        for folder in (self.root, self.state, self.project / "Assets", self.project / "ProjectSettings"):
             folder.mkdir(parents=True)
         (self.project / "ProjectSettings/ProjectVersion.txt").write_text("m_EditorVersion: 6000.3.15f1\n")
         self.rows = [{"asset_key": str(i), "file": f"Package {i} v1.2.unitypackage"} for i in range(3)]

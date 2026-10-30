@@ -11,7 +11,7 @@ project instead (see package_install._route). The source project is locked too
 and gets its own backups and rollback. clean (per package, default false) moves
 the package's existing folders into its backup first, then installs fresh; the
 moved folders stay in backup_path for review.
-`<root>/.data/assets.json` is the authoritative index. No Unity Editor, unity
+The library's state-directory assets.json is the authoritative index. No Unity Editor, unity
 CLI, bridge or runner takes part in `run`: files are written straight to
 Assets/ while preserving asset GUIDs and existing shared-folder identities.
 Individual files are atomic; Unity refreshes separately.
@@ -444,7 +444,7 @@ def run_import(fields):
     completed = 0
     project = fields["project"]
     project_version(project)
-    state_dir = ia.data_dir(fields["root"])
+    state_dir = ia.state_dir(fields["root"])
     links = linked_folders(project)
     following = any(row.get("follow_links", fields.get("follow_links", False)) for row in fields["packages"])
     sources = sorted({link["source"] for link in links if link["source"]}) if following else []

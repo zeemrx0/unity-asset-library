@@ -6,10 +6,13 @@ Run:  python3 -m unittest discover -s tests -v
 
 import json
 import os
+import tempfile
 import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
+# Never touch this machine's real application data.
+os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 
 import resolve_store as rs  # noqa: E402
 

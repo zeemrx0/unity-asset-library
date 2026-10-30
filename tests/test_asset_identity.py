@@ -12,6 +12,8 @@ from unittest import mock
 
 BIN = Path(__file__).resolve().parents[1] / "bin"
 sys.path.insert(0, str(BIN))
+# Never touch this machine's real application data.
+os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 import cleanup_versions as cv
 import index_assets as ia
 import storage

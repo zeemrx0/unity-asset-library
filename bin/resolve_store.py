@@ -481,6 +481,59 @@ def load_cache(path):
 def save_cache(path, cache):
     from index_assets import write_atomic
     write_atomic(path, json.dumps(cache, indent=1, sort_keys=True))
+    state = os.path.dirname(os.path.abspath(path))
+    previous = load_matches(state)
+    matches = matches_from(cache, previous)
+    if matches != previous:
+        write_atomic(_matches_path(state), json.dumps(matches_payload(matches), indent=1, sort_keys=True))
+
+
+# Store-id matches are user data: they follow the library so another machine
+# can rebuild store metadata by id instead of repeating web searches.
+def _matches_path(state):
+    from index_assets import user_path
+    return user_path(state, "matches.json")
+
+
+def load_matches(state):
+    """{asset_key: store_id}. Missing is empty; malformed raises ValueError."""
+    try:
+        with open(_matches_path(state), encoding="utf-8") as fh:
+            value = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise ValueError("store-id matches are unreadable; fix or remove the library's .data/matches.json") from exc
+    if (not isinstance(value, dict) or value.get("version") != 1
+            or not isinstance(value.get("matches"), dict)
+            or not all(isinstance(k, str) and isinstance(v, str) and v.isdigit()
+                       for k, v in value["matches"].items())):
+        raise ValueError("store-id matches are malformed")
+    return dict(value["matches"])
+
+
+def matches_from(cache, previous=None):
+    """Previous matches updated with every resolved cache record."""
+    out = dict(previous or {})
+    for key, rec in (cache or {}).get("resolved", {}).items():
+        if isinstance(rec, dict) and rec.get("status") == "resolved" and str(rec.get("id", "")).isdigit():
+            out[key] = str(rec["id"])
+    return out
+
+
+def matches_payload(matches):
+    return {"version": 1, "matches": dict(sorted(matches.items()))}
+
+
+def resolve_known(asset, package_id, session=None):
+    """Re-resolve a previously matched id without web search or the name gate.
+
+    The id is user data (an earlier verified match or a user correction), so it
+    is authoritative like an override. Raises Blocked like legacy_lookup."""
+    legacy = legacy_lookup(package_id, session=session)
+    return {"status": "resolved", "title": asset["name"], "id": package_id,
+            "legacy": legacy or {}, "score": None, "transport": "matches",
+            "verified_via": "matches.json", "candidates_rejected": []}
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +945,8 @@ def _main_unlocked(argv=None):
     index_dir = os.path.abspath(args.state) if args.state else state_dir()
     assets_json = os.path.join(index_dir, "assets.json")
     cache_path = os.path.join(index_dir, "cache.json")
-    overrides_path = os.path.join(index_dir, "overrides.json")
+    from index_assets import user_path
+    overrides_path = user_path(index_dir, "overrides.json")
     data = _read_index(index_dir, lock_already_held=True) if args.command in ("enrich", "export-titles") else None
 
     if args.command == "export-titles":
@@ -1001,6 +1055,8 @@ def _main_unlocked(argv=None):
             if not pending_keys:
                 print("  (pending queue is empty — attempting nothing)")
 
+        known = load_matches(index_dir)
+
         def already_done(asset):
             rec = cache["resolved"].get(asset["asset_key"])
             return bool(rec) and rec.get("status") == "resolved"
@@ -1036,7 +1092,10 @@ def _main_unlocked(argv=None):
                       resolved=stats["resolved"], failed=stats["failed"],
                       blocked=stats["blocked"], skipped=stats["skipped"])
             try:
-                rec = resolve_asset(asset, pool, session=session)
+                if known.get(key):
+                    rec = resolve_known(asset, known[key], session=session)
+                else:
+                    rec = resolve_asset(asset, pool, session=session)
                 all_blocked_streak = 0
                 pacer.ok()
             except AllTransportsBlocked as exc:

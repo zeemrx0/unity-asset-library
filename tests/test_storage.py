@@ -9,6 +9,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
+# Never touch this machine's real application data.
+os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 
 import index_assets as ia  # noqa: E402
 import server  # noqa: E402
@@ -33,7 +35,8 @@ class StorageTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _state(self, root):
-        return storage.data_dir(root)
+        """This machine's state directory for a library (index, cache, locks)."""
+        return ia.app_state_dir(root)
 
     def _write_legacy_state(self, root, *, with_meta=True, names=("assets.json", "cache.json")):
         """Seed a legacy repo state/ bound to `root`."""
@@ -273,7 +276,7 @@ class StorageTest(unittest.TestCase):
         self.assertTrue(result["needsIndex"])
         self.assertFalse(result["needsSetup"])
         storage.configure(self.repo, moved, "instance-test-2")
-        moved_state = storage.data_dir(moved)
+        moved_state = self._state(moved)
         self.assertEqual(user_tags.load(moved_state)["assignments"][key], ["keeper"])
         with open(os.path.join(moved_state, "assets.json"), encoding="utf-8") as fh:
             rebuilt = json.load(fh)
@@ -289,7 +292,7 @@ class StorageTest(unittest.TestCase):
         old = self.root_a + "-old"
         os.rename(self.root_a, old)
         os.mkdir(self.root_a)
-        os.rename(os.path.join(old, ".data"), state)
+        os.rename(os.path.join(old, ".data"), os.path.join(self.root_a, ".data"))
         os.rename(os.path.join(old, "A v1.0.unitypackage"),
                   os.path.join(self.root_a, "A v1.0.unitypackage"))
         output = io.StringIO()
@@ -348,6 +351,84 @@ class StorageTest(unittest.TestCase):
         self.assertEqual([r["rel_path"] for r in ia.scan(self.root_a)], ["A v1.0.unitypackage"])
         with open(archive, "rb") as fh:
             self.assertEqual(fh.read(), b"private backup")
+
+    # -- vault .data split ---------------------------------------------------
+
+    def _seed_old_vault_layout(self, root):
+        vault = storage.data_dir(root)
+        os.makedirs(os.path.join(vault, "ai-enrichment-run"))
+        files = {
+            "assets.json": json.dumps(ia.build(ia.scan(root))),
+            "cache.json": json.dumps({"resolved": {"k1": {"status": "resolved", "id": "42"},
+                                                   "k2": {"status": "unverified"}},
+                                      "misses": {}}),
+            "preferences.json": "{}",
+            "CHANGES.md": "# history\n",
+            "identity-migration-backup.json": "{}",
+            "favorites.json": json.dumps({"favorites": ["k1"]}),
+            "user_tags.json": json.dumps({"tags": [], "assignments": {}}),
+            "state-write.lock": "",
+            os.path.join("ai-enrichment-run", "summary.json"): "{}",
+        }
+        for name, text in files.items():
+            with open(os.path.join(vault, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        return vault
+
+    def test_old_vault_layout_moves_machine_files_and_keeps_user_data(self):
+        vault = self._seed_old_vault_layout(self.root_a)
+        state = storage.ensure_state_dir(self.root_a)
+        self.assertEqual(sorted(os.listdir(vault)), ["favorites.json", "matches.json", "user_tags.json"])
+        for name in ("assets.json", "cache.json", "preferences.json", "CHANGES.md",
+                     "identity-migration-backup.json"):
+            self.assertTrue(os.path.isfile(os.path.join(state, name)), name)
+        # Unknown leftovers are archived, never deleted.
+        self.assertTrue(os.path.isfile(os.path.join(state, "legacy", "ai-enrichment-run", "summary.json")))
+        with open(os.path.join(state, "cache.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["resolved"]["k1"]["id"], "42")
+        # Rerun is a no-op.
+        self.assertEqual(storage.ensure_state_dir(self.root_a), state)
+        self.assertEqual(sorted(os.listdir(vault)), ["favorites.json", "matches.json", "user_tags.json"])
+
+    def test_interrupted_vault_move_finishes_and_state_copy_wins(self):
+        vault = self._seed_old_vault_layout(self.root_a)
+        state = ia.app_state_dir(self.root_a)
+        os.makedirs(state)
+        with open(os.path.join(state, "preferences.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"kept": true}')
+        storage.ensure_state_dir(self.root_a)
+        with open(os.path.join(state, "preferences.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"kept": True})
+        # The differing vault copy is not deleted: nothing is lost silently.
+        self.assertTrue(os.path.exists(os.path.join(vault, "preferences.json")))
+
+    def test_configure_writes_store_id_matches_to_vault(self):
+        self._seed_old_vault_layout(self.root_a)
+        storage.configure(self.repo, self.root_a, "instance-test-1")
+        with open(os.path.join(storage.data_dir(self.root_a), "matches.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"version": 1, "matches": {"k1": "42"}})
+        self.assertFalse(os.path.exists(os.path.join(self._state(self.root_a), "matches.json")))
+
+    def test_new_machine_keeps_user_data_and_rebuilds_state(self):
+        storage.configure(self.repo, self.root_a, "instance-test-1")
+        state = self._state(self.root_a)
+        with open(os.path.join(state, "assets.json"), encoding="utf-8") as fh:
+            key = json.load(fh)["assets"][0]["asset_key"]
+        user_tags.mutate(state, {"action": "assign", "tag": "keeper", "asset_key": key})
+        with mock.patch.dict(os.environ, {"UAL_APP_DATA": os.path.join(self.tmp.name, "other-mac")}):
+            other = ia.app_state_dir(self.root_a)
+            self.assertNotEqual(other, state)
+            self.assertTrue(storage.status(self.repo)["needsIndex"])
+            storage.configure(self.repo, self.root_a, "instance-test-2")
+            self.assertEqual(user_tags.load(other)["assignments"][key], ["keeper"])
+            self.assertTrue(os.path.isfile(os.path.join(other, "assets.json")))
+
+    def test_state_dir_bound_to_another_library_is_refused(self):
+        state = storage.ensure_state_dir(self.root_a)
+        storage._write_json(os.path.join(state, ia.BINDING_NAME), {"vault_root": self.root_b})
+        with self.assertRaises(storage.StorageError):
+            storage.ensure_state_dir(self.root_a)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
