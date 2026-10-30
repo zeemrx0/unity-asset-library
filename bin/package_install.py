@@ -588,7 +588,7 @@ def _route(project, records, links, follow_links):
     sources = sorted(set(owners.values()))
     names = ", ".join(os.path.basename(source) for source in sources)
     if not follow_links:
-        raise InstallError(folders + " is linked to " + names + ". Turn on \u201cInstall linked packages into source project\u201d to update it there.")
+        raise InstallError(folders + " is linked to " + names + ". Turn on \u201cSymlink\u201d to update it there.")
     if len(sources) > 1:
         raise InstallError("Package uses folders linked to different projects (" + names + "): " + folders)
     if unlinked:

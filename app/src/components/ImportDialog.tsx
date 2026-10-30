@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { AlertDialog, AlertDialogBackdrop, AlertDialogBody, AlertDialogContent, AlertDialogFooter, AlertDialogHeader, Button, Icon } from "./ui";
-import { ArrowDown, ArrowUp, ArrowDownUp, Check, CircleAlert, Cloud, Folder, Link2, Package, ShieldCheck, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowDownUp, Check, CircleAlert, Cloud, Folder, Info, Link2, Package, ShieldCheck, X } from "lucide-react";
 import SpotlightCard from "./react-bits/SpotlightCard";
 import GlideSelect from "./react-bits/GlideSelect";
 import LatticeLoader from "./react-bits/LatticeLoader";
@@ -113,7 +113,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
   const finished = Boolean(job && !running);
   const [order, setOrder] = useState<ReviewRow[]>(() => assets.map((asset) => {
     const versions = unityPackages(asset);
-    return { id: asset.asset_key, assetKey: asset.asset_key, name: asset.name, file: versions.length === 1 ? versions[0].file || "" : "", followLinks: true, clean: false };
+    return { id: asset.asset_key, assetKey: asset.asset_key, name: asset.name, file: versions.length === 1 ? versions[0].file || "" : "", followLinks: false, clean: false };
   }));
   const byKey = useMemo(() => new Map(catalog.map((asset) => [asset.asset_key, asset])), [catalog]);
   const byFile = useMemo(() => new Map(catalog.flatMap((asset) => unityPackages(asset).map((version) => [version.file, asset] as const))), [catalog]);
@@ -193,6 +193,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
   const projectLinks = projectInfo?.path === projectPath ? projectInfo.linked_folders || [] : [];
   const hasSourceLinks = projectLinks.some((link) => link.source);
   const sourceNames = [...new Set(projectLinks.filter((link) => link.source).map((link) => link.source_title))].join(", ");
+  const symlinkHelp = `Symlink: if this package's files sit inside a folder symlinked from ${sourceNames}, install it into ${sourceNames} instead. Every project that links to it gets the change. Off by default.`;
   const allFollow = order.length > 0 && order.every((row) => row.followLinks);
   function setRowLinks(ids: string[], value: boolean) {
     setOrder((current) => current.map((item) => ids.includes(item.id) ? { ...item, followLinks: value } : item));
@@ -243,7 +244,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
     const rows = remaining.map((result): ReviewRow => {
       const asset = byFile.get(result.file);
       const previous = order.find((row) => row.file === result.file);
-      return { id: result.file, assetKey: asset?.asset_key || previous?.assetKey || null, name: asset?.name || previous?.name || filename(result.file).replace(/\.unitypackage$/i, ""), file: result.file, followLinks: result.follow_links ?? previous?.followLinks ?? true, clean: result.clean ?? previous?.clean ?? false };
+      return { id: result.file, assetKey: asset?.asset_key || previous?.assetKey || null, name: asset?.name || previous?.name || filename(result.file).replace(/\.unitypackage$/i, ""), file: result.file, followLinks: result.follow_links ?? previous?.followLinks ?? false, clean: result.clean ?? previous?.clean ?? false };
     });
     setOrder(rows);
     setOverwrite(job.overwrite ?? true);
@@ -312,7 +313,7 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
                 </div>
                 <div className="import-row-actions">
                   <label className="import-row-link" title="Move this package's existing folders to backups, then install fresh. Use when a new version renames or removes files."><span>Clean</span><SquishSwitch checked={row.clean} disabled={starting} onChange={(value) => setOrder((current) => current.map((item) => item.id === row.id ? { ...item, clean: value } : item))} width={32} height={20} radius={10} ariaLabel={`Clean reinstall ${row.name}`} /></label>
-                  {hasSourceLinks && <label className="import-row-link" title={`Install into ${sourceNames} when this package's files are inside a linked folder`}><Icon as={Link2} className="icon" aria-hidden="true" /><span>Source</span><SquishSwitch checked={row.followLinks} disabled={starting} onChange={(value) => setRowLinks([row.id], value)} width={32} height={20} radius={10} ariaLabel={`Install ${row.name} into linked source project`} /></label>}
+                  {hasSourceLinks && <label className="import-row-link"><Icon as={Link2} className="icon" aria-hidden="true" /><span>Symlink</span><span className="info-tip" role="img" title={symlinkHelp} aria-label={symlinkHelp}><Icon as={Info} className="icon" aria-hidden="true" /></span><SquishSwitch checked={row.followLinks} disabled={starting} onChange={(value) => setRowLinks([row.id], value)} width={32} height={20} radius={10} ariaLabel={`Install ${row.name} into linked source project`} /></label>}
                   <span className="import-status" data-kind={!selected || availability === "missing" ? "failed" : availability === "local" ? "local" : "neutral"}>{!selected ? "Choose version" : availability === "missing" ? "Missing" : availability === "cloud_only" ? <><Icon as={Cloud} className="icon" aria-hidden="true" />Cloud</> : availability === "local" ? <><Icon as={Check} className="icon" aria-hidden="true" />Ready</> : "Unknown"}</span>
                   {reordering ? <div className="import-package-order"><Button type="button" className="icon-button" onPress={() => move(index, -1)} isDisabled={index === 0 || starting} aria-label={`Move ${row.name} up`}><Icon as={ArrowUp} className="icon" aria-hidden="true" /></Button><Button type="button" className="icon-button" onPress={() => move(index, 1)} isDisabled={index === order.length - 1 || starting} aria-label={`Move ${row.name} down`}><Icon as={ArrowDown} className="icon" aria-hidden="true" /></Button></div> : <Button type="button" className="icon-button import-remove" onPress={() => remove(row)} isDisabled={starting} aria-label={`Remove ${row.name} from import`}><Icon as={X} className="icon" aria-hidden="true" /></Button>}
                 </div>
@@ -340,8 +341,8 @@ export function ImportDialog({ assets, catalog, job, finalFocusRef, onClose, onS
         {!job && <>
           <section className="import-policy" aria-label="Replacement policy">
             <label className="import-overwrite"><span><Icon as={ShieldCheck} className="icon" aria-hidden="true" /><strong>Replace changed assets</strong></span><SquishSwitch checked={overwrite} disabled={starting} onChange={setOverwrite} width={40} height={24} radius={12} ariaLabel="Replace changed assets" /><span className="import-toggle" aria-hidden="true">{overwrite ? "On" : "Off"}</span></label>
-            {hasSourceLinks && <label className="import-overwrite"><span><Icon as={Link2} className="icon" aria-hidden="true" /><strong>Install linked packages into source project</strong></span><SquishSwitch checked={allFollow} disabled={starting || !order.length} onChange={(value) => setRowLinks(order.map((row) => row.id), value)} width={40} height={24} radius={12} ariaLabel="Install all linked packages into source project" /><span className="import-toggle" aria-hidden="true">{allFollow ? "All" : order.some((row) => row.followLinks) ? "Some" : "Off"}</span></label>}
-            {hasSourceLinks && order.some((row) => row.followLinks) && <p className="import-note">Packages marked “Source” that sit inside linked folders update {sourceNames}. Every project that links to it gets the change. Use each package’s switch to choose.</p>}
+            {hasSourceLinks && <label className="import-overwrite"><span><Icon as={Link2} className="icon" aria-hidden="true" /><strong>Symlink</strong><span className="info-tip" role="img" title={symlinkHelp.replace("this package's", "a package's")} aria-label={symlinkHelp.replace("this package's", "a package's")}><Icon as={Info} className="icon" aria-hidden="true" /></span></span><SquishSwitch checked={allFollow} disabled={starting || !order.length} onChange={(value) => setRowLinks(order.map((row) => row.id), value)} width={40} height={24} radius={12} ariaLabel="Symlink: install all linked packages into source project" /><span className="import-toggle" aria-hidden="true">{allFollow ? "All" : order.some((row) => row.followLinks) ? "Some" : "Off"}</span></label>}
+            {hasSourceLinks && order.some((row) => row.followLinks) && <p className="import-note">Packages marked “Symlink” that sit inside symlinked folders update {sourceNames}. Every project that links to it gets the change. Use each package’s switch to choose.</p>}
             <div id="import-safety" className={overwrite ? "import-warning" : "import-save-note"} role="note"><Icon as={CircleAlert} className="icon" aria-hidden="true" /><p>{overwrite && <><strong>Existing assets may be replaced.</strong> Changed files are backed up.<br /></>}Save your Unity changes before importing.</p></div>
           </section>
           <span id="import-blocker" className="import-footer-note" role="status">{blocker || "Ready to import"}</span><Button ref={firstButtonRef} type="button" className="button quiet" onPress={onClose} isDisabled={starting}>Cancel</Button><Button type="button" className="button primary" onPress={() => void start()} isDisabled={!canStart} aria-describedby="import-blocker import-safety">{starting ? "Starting…" : `Import ${order.length} package${order.length === 1 ? "" : "s"}`}</Button>

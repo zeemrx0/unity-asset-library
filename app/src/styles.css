@@ -1217,6 +1217,8 @@ html[data-focus-visible="false"] .asset-context-menu__item:focus-visible { box-s
 .import-version-select .glide-select__trigger { min-height: 32px; font-size: 12px; }
 .import-policy { flex-basis: 100%; margin: 0 0 8px; }
 .import-row-link { display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
+.info-tip { display: inline-flex; color: var(--muted); cursor: help; }
+.info-tip .icon { width: 13px; height: 13px; }
 .import-linked-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; display: grid; gap: 4px; }
 .import-overwrite { display: flex; gap: 8px; align-items: center; position: relative; cursor: pointer; font-size: 13px; min-height: 32px; }
 .import-overwrite > span:first-child { display: flex; gap: 8px; align-items: center; margin-right: auto; }

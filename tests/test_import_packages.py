@@ -342,7 +342,7 @@ class ImportTests(unittest.TestCase):
         toolkit = self.linked_toolkit()
         result = ip.run_import(ip.validate_request({**self.request, "overwrite": True}))
         self.assertEqual(result["results"][0]["status"], "failed")
-        self.assertIn("Install linked packages into source project", result["results"][0]["error"])
+        self.assertIn("Turn on \u201cSymlink\u201d", result["results"][0]["error"])
         path = self.base / "mixed.unitypackage"
         package(path, [("e" * 32, "Assets/Tool/Added.txt", b"added"), ("f" * 32, "Assets/Plugins/X.dll", b"x")])
         with self.assertRaisesRegex(pi.InstallError, "mixes linked folder"), tempfile.TemporaryDirectory(dir=self.base) as staging:
