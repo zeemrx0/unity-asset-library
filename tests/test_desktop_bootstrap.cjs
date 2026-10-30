@@ -47,7 +47,7 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), "ual-bootstrap-"));
 
     // A compatible external backend is surfaced but never made mutable by this desktop shell.
     const externalState = {
-      service: "unity-asset-library", api_version: 7, ready: true, csrf: "external-token",
+      service: "unity-asset-library", api_version: 8, ready: true, csrf: "external-token",
       vault_root: selected, repo: temp, instance_id: "other-process",
     };
     context.fetch = async () => ({ ok: true, text: async () => JSON.stringify(externalState) });

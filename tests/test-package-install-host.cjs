@@ -13,7 +13,7 @@ const localRequire = createRequire(entry);
     fs.mkdirSync(project);
     const handlers = {};
     const requests = [];
-    const state = { service: 'unity-asset-library', api_version: 7, ready: true, csrf: 'test', vault_root: root, repo: root, instance_id: 'fixture', job: null, action: null };
+    const state = { service: 'unity-asset-library', api_version: 8, ready: true, csrf: 'test', vault_root: root, repo: root, instance_id: 'fixture', job: null, action: null };
     const app = { isPackaged: false, getPath: () => root, setPath() {}, whenReady: () => ({ then() {} }), on() {}, quit() {} };
     const context = vm.createContext({
       require: name => name === 'electron' ? { app, ipcMain: { handle: (name, fn) => { handlers[name] = fn; } } } : localRequire(name),

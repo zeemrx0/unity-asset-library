@@ -43,6 +43,8 @@ try {
   const result = execFileSync(python, ["-c", `
 import io, json, os, pathlib, subprocess, sys, tarfile, threading
 sys.path.insert(0, sys.argv[1])
+# Keep machine-local library state inside the smoke sandbox.
+os.environ["UAL_APP_DATA"] = str(pathlib.Path(sys.argv[2]) / "app-data")
 import requests, storage, server
 repo = pathlib.Path(sys.argv[2]) / "workspace"
 vault = pathlib.Path(sys.argv[2]) / "empty-library"
@@ -65,7 +67,7 @@ with tarfile.open(vault / file, "w:gz") as archive:
         entry = tarfile.TarInfo(guid + "/" + leaf)
         entry.size = len(data)
         archive.addfile(entry, io.BytesIO(data))
-(vault / ".data/assets.json").write_text(json.dumps({"assets": [{"asset_key": "proof", "versions": [{"file": file}]}]}))
+(pathlib.Path(storage.ia.app_state_dir(str(vault))) / "assets.json").write_text(json.dumps({"assets": [{"asset_key": "proof", "versions": [{"file": file}]}]}))
 request = pathlib.Path(sys.argv[2]) / "import.json"
 request.write_text(json.dumps({"id": "bundle-smoke", "repo": str(repo), "root": str(vault), "project": str(project), "packages": [{"asset_key": "proof", "file": file}]}))
 result = subprocess.run([sys.executable, str(pathlib.Path(sys.argv[1]) / "import_packages.py"), "run", "--request", str(request)], capture_output=True, text=True, timeout=30)
