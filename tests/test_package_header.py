@@ -38,6 +38,12 @@ def store_header(**over):
     return header(subfield(b"A$", meta(**over)))
 
 
+def parsed_id(head):
+    result = ph.parse_header(head)
+    assert result is not None
+    return result["id"]
+
+
 class ParseHeaderTests(unittest.TestCase):
     def test_valid_header(self):
         self.assertEqual(ph.parse_header(store_header()), {
@@ -46,11 +52,11 @@ class ParseHeaderTests(unittest.TestCase):
 
     def test_misspelled_link_type_still_parses(self):
         head = store_header(link={"id": "177524", "type": "contemt"})
-        self.assertEqual(ph.parse_header(head)["id"], "177524")
+        self.assertEqual(parsed_id(head), "177524")
 
     def test_unrelated_subfield_before_store_data(self):
         head = header(subfield(b"XY", b"abc") + subfield(b"A$", meta()))
-        self.assertEqual(ph.parse_header(head)["id"], "177524")
+        self.assertEqual(parsed_id(head), "177524")
 
     def test_rejections(self):
         cases = {
@@ -93,7 +99,9 @@ class MaterializedTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".unitypackage", delete=False) as fh:
             fh.write(store_header())
         self.addCleanup(os.unlink, fh.name)
-        self.assertEqual(ph.read_store_header(fh.name)["id"], "177524")
+        result = ph.read_store_header(fh.name)
+        assert result is not None
+        self.assertEqual(result["id"], "177524")
 
     def test_missing_file(self):
         self.assertIsNone(ph.read_store_header("/nonexistent/x.unitypackage"))

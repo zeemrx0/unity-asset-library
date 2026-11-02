@@ -78,11 +78,15 @@ def build(cache):
 def main(argv):
     src = argv[1] if len(argv) > 1 else os.path.join(REPO, "state", "cache.json")
     out = argv[2] if len(argv) > 2 else os.path.join(REPO, "tests", "fixtures", "match_calibration.json")
-    with open(src, encoding="utf-8") as fh:
-        data = build(json.load(fh))
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=1, ensure_ascii=False)
-        fh.write("\n")
+    try:
+        with open(src, encoding="utf-8") as fh:
+            data = build(json.load(fh))
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1, ensure_ascii=False)
+            fh.write("\n")
+    except (OSError, ValueError) as exc:
+        print(f"build-match-calibration: {exc}", file=sys.stderr)
+        return 1
     print(f"positives={len(data['positives'])} negatives={len(data['negatives'])} "
           f"unverified={len(data['unverified'])} -> {out}")
     return 0

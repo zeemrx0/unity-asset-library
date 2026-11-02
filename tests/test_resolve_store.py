@@ -1201,11 +1201,10 @@ class TestCandidateSelection(unittest.TestCase):
         self.assertEqual(rec["reason"], "ambiguous")
 
     def test_search_adds_cleaned_core_query(self):
-        session = MultiSession({}) if False else None
         sent = []
 
         class Recorder:
-            def get(self, url, params=None, **kw):
+            def get(self, url, params, **kw):
                 sent.append(params["q"])
                 return FakeResponse("<html></html>")
 
@@ -1213,13 +1212,12 @@ class TestCandidateSelection(unittest.TestCase):
         pool.search("Cartoon FX 2 Remaster [R 1.2.4]")
         self.assertEqual(sent[-1], "site:assetstore.unity.com cartoon fx 2 remaster")
         self.assertEqual(len(sent), 3)
-        del session
 
     def test_no_extra_query_when_title_is_already_clean(self):
         sent = []
 
         class Recorder:
-            def get(self, url, params=None, **kw):
+            def get(self, url, params, **kw):
                 sent.append(params["q"])
                 return FakeResponse("<html></html>")
 

@@ -16,6 +16,9 @@ Serves the React/Electron app's fixed JSON API:
     POST /api/organize/apply confirm an organize preview by plan_hash
     POST /api/enrich/start   pending-only resolve -> enrich -> emit background job
     POST /api/enrich/cancel  terminate the job's child process
+    POST /api/sync/start     index -> store match -> review plan (trigger manual|auto)
+    POST /api/sync/apply     confirm the sync review by review_hash
+    POST /api/sync/cancel    stop a running sync or dismiss its review
     GET  /api/job/<id>       job status, stage, progress, bounded log tail
 
 The six plan/apply routes return HTTP 202 {job_id}; poll /api/action/<id>.
@@ -164,6 +167,9 @@ class ViewerService:
         self._instance_lock_fh = None
         self._job_thread = None
         self._action_thread = None
+        self._sync = None
+        self._sync_rerun = False
+        self._last_auto_match = (0.0, None)
         self._scan = ia.scan
         self._plan_cleanup = self._plan_cleanup_impl
         self._capture_cleanup_snapshot = cv.capture_snapshot
@@ -356,6 +362,7 @@ class ViewerService:
         with self._job_lock:
             job = self._job_snapshot(self._job)
             action = self._action_snapshot(self._action)
+            sync = self._sync_snapshot(self._sync)
         return {
             "service": "unity-asset-library",
             "api_version": storage.API_VERSION,
@@ -366,6 +373,7 @@ class ViewerService:
             "pending_enrichment": self._pending_count(),
             "job": job,
             "action": action,
+            "sync": sync,
             "csrf": self.token,
         }
 
@@ -654,6 +662,9 @@ class ViewerService:
         with self._job_lock:
             if self._shutting_down or self._admissions_closed:
                 raise Busy("server is shutting down")
+            running_sync = self._active_sync()
+            if running_sync:
+                raise Busy("sync is running", job_id=running_sync["id"])
             active = self._action
             if active and active["status"] in ("queued", "running"):
                 raise Busy("an action is already active", job_id=active["id"])
@@ -772,6 +783,9 @@ class ViewerService:
         with self._job_lock:
             if self._shutting_down or self._admissions_closed:
                 raise Busy("server is shutting down")
+            running_sync = self._active_sync()
+            if running_sync:
+                raise Busy("sync is running", job_id=running_sync["id"])
             job = self._job
             if job and job["status"] in ("queued", "running"):
                 raise Busy("an enrich job is already active", job_id=job["id"])
@@ -865,7 +879,9 @@ class ViewerService:
             job["counts"].update({k: v for k, v in counts.items()
                                    if isinstance(k, str) and isinstance(v, (int, float))})
 
-    def _job_body(self, job):
+    def _job_body(self, job, finish=True):
+        """Run resolve -> enrich -> emit. Returns True on success. With finish=False
+        the caller owns the terminal status (sync runs these stages inside its job)."""
         stages = (
             ("resolve", [sys.executable, "-u", self.resolve_py, "resolve", "--resume",
                          "--pending", "--progress-json", "--state", self.state,
@@ -922,7 +938,7 @@ class ViewerService:
                         if job["status"] == "cancelled":
                             return
                         proc = self._runner(argv)
-                    for line in proc.stdout:
+                    for line in proc.stdout or ():
                         line = line.rstrip("\n")
                         if line.startswith(PROGRESS_PREFIX):
                             try:
@@ -961,8 +977,10 @@ class ViewerService:
                 if job["status"] == "cancelled":
                     return
                 job["remaining"] = self._pending_count()
-                job["status"] = "completed"
-                job["finished_at"] = time.time()
+                if finish:
+                    job["status"] = "completed"
+                    job["finished_at"] = time.time()
+            return True
         except BaseException as exc:
             with self._job_lock:
                 if job["status"] not in ("cancelled", "failed", "completed"):
@@ -981,13 +999,249 @@ class ViewerService:
                 self._gate_owner = None
                 self._gate.release()
 
+    # -- sync job -----------------------------------------------------------
+    # One job for the whole library: update the index, match pending assets to the
+    # store, then plan cleanup + organize. Index and matching apply on their own;
+    # file moves and deletions wait in "review" until the user confirms them.
+
+    AUTO_MATCH_INTERVAL = 6 * 3600
+
+    def _active_sync(self):
+        """The running sync job dict, or None."""
+        sync = self._sync
+        return sync if sync and sync["status"] in ("queued", "running") else None
+
+    def _sync_active(self):
+        return self._active_sync() is not None
+
+    @staticmethod
+    def _sync_snapshot(job):
+        if not job:
+            return None
+        return {key: (dict(value) if key == "counts" else value)
+                for key, value in job.items() if key != "log"}
+
+    def op_sync_start(self, trigger="manual"):
+        if trigger not in ("manual", "auto"):
+            raise ValueError("unknown sync trigger")
+        with self._job_lock:
+            if self._shutting_down or self._admissions_closed:
+                raise Busy("server is shutting down")
+            running_sync = self._active_sync()
+            if running_sync:
+                self._sync_rerun = True
+                return {"job_id": running_sync["id"], "coalesced": True}
+            for other in (self._action, self._job):
+                if other and other["status"] in ("queued", "running"):
+                    raise Busy("another operation is active", job_id=other["id"])
+            job = {
+                "id": uuid.uuid4().hex, "kind": "sync", "trigger": trigger,
+                "status": "queued", "stage": "queued", "completed": 0,
+                "total": None, "current_item": None, "counts": {},
+                "remaining": None, "started_at": time.time(), "finished_at": None,
+                "result": None, "error": None, "error_code": None,
+                "log": collections.deque(maxlen=LOG_LINES),
+            }
+            self._sync = job
+            threading.Thread(target=self._sync_body, args=(job,), daemon=True,
+                             name=f"sync-{job['id']}").start()
+        return {"job_id": job["id"], "coalesced": False}
+
+    def _sync_progress(self, job):
+        return lambda event: self._publish_job_progress(job, event)
+
+    def _sync_finish(self, job, status, error=None, error_code=None):
+        with self._job_lock:
+            if job["status"] == "cancelled":
+                return
+            job["status"] = status
+            job["error"] = error
+            job["error_code"] = error_code
+            job["current_item"] = None
+            job["finished_at"] = time.time()
+
+    def _sync_cancelled(self, job):
+        with self._job_lock:
+            return job["status"] == "cancelled"
+
+    def _sync_set_stage(self, job, stage):
+        with self._job_lock:
+            if job["status"] == "queued":
+                job["status"] = "running"
+            job.update(stage=stage, completed=0, total=None, current_item=None)
+
+    def _sync_should_match(self, job):
+        pending = self._pending_count()
+        if pending == 0:
+            return False
+        if job["trigger"] == "manual":
+            return True
+        last_at, last_pending = self._last_auto_match
+        return pending != last_pending or time.time() - last_at >= self.AUTO_MATCH_INTERVAL
+
+    def _sync_body(self, job):
+        progress = self._sync_progress(job)
+        try:
+            self._sync_set_stage(job, "scan")
+            with self.mutation_gate("sync-index"), self.state_write_lock(), self.engine_lock_attempt():
+                scanned = self._strict_scan(progress=progress)
+                preview, _ = self.resync_preview(scanned, progress=progress)
+                if (any(dict(preview["totals"]).values())
+                        and self._index_update(scanned, progress=progress) != 0):
+                    self._sync_finish(job, "failed", "The index could not be updated.", "index_failed")
+                    return
+            with self._job_lock:
+                job["result"] = {"index": dict(preview["totals"]), "pending_after": None, "review": None}
+            if self._sync_cancelled(job):
+                return
+
+            if self._sync_should_match(job):
+                self._sync_set_stage(job, "match")
+                if not self._job_body(job, finish=False):
+                    return
+                self._last_auto_match = (time.time(), self._pending_count())
+            if self._sync_cancelled(job):
+                return
+
+            self._sync_set_stage(job, "review")
+            review = self._compute_review()
+            with self._job_lock:
+                job["result"]["review"] = review if review["count"] else None
+                job["result"]["pending_after"] = self._pending_count()
+                job["remaining"] = job["result"]["pending_after"]
+            self._sync_finish(job, "review" if review["count"] else "completed")
+        except Busy as exc:
+            self._sync_finish(job, "failed", str(exc), "busy")
+        except BaseException as exc:
+            self._sync_finish(job, "failed", str(exc), "worker_error")
+        finally:
+            self._sync_maybe_rerun(job)
+
+    def _sync_maybe_rerun(self, job):
+        with self._job_lock:
+            rerun = self._sync_rerun and job["status"] in ("completed", "failed")
+            if rerun:
+                self._sync_rerun = False
+        if not rerun:
+            return
+        try:
+            self.op_sync_start("auto")
+        except Busy:
+            # Another operation started first; the next watcher event retries.
+            return
+
+    def _compute_review(self):
+        review = {"count": 0, "unavailable": [], "cleanup": None, "organize": None}
+        try:
+            plan = self.op_cleanup_plan()
+            if plan["preview"].get("removals"):
+                review["cleanup"] = plan
+        except SafetyError as exc:
+            review["unavailable"].append(f"Old-version cleanup: {exc}")
+        try:
+            plan = self.op_organize_plan()
+            if plan["preview"].get("moves"):
+                review["organize"] = plan
+        except (SafetyError, ov.StaleIndex) as exc:
+            review["unavailable"].append(f"Folder organization: {exc}")
+        review["count"] = (len((review["cleanup"] or {}).get("preview", {}).get("removals", []))
+                           + len((review["organize"] or {}).get("preview", {}).get("moves", [])))
+        review["review_hash"] = hashlib.sha256(canonical({
+            "cleanup": (review["cleanup"] or {}).get("plan_hash"),
+            "organize": (review["organize"] or {}).get("plan_hash")}).encode()).hexdigest()
+        return review
+
+    def op_sync_apply(self, review_hash):
+        with self._job_lock:
+            job = self._sync
+            review = ((job or {}).get("result") or {}).get("review")
+            if (not job or job["status"] != "review" or not review
+                    or not isinstance(review_hash, str)
+                    or not hmac.compare_digest(review_hash, review["review_hash"])):
+                raise Drift({"kind": "sync"}, "")
+            job.update(status="running", stage="validate", error=None, error_code=None,
+                       finished_at=None)
+            threading.Thread(target=self._sync_apply_body, args=(job, review), daemon=True,
+                             name=f"sync-apply-{job['id']}").start()
+        return {"job_id": job["id"]}
+
+    def _sync_back_to_review(self, job, error_code, error):
+        review = self._compute_review()
+        with self._job_lock:
+            job["result"]["review"] = review if review["count"] else None
+        self._sync_finish(job, "review" if review["count"] else "completed", error, error_code)
+
+    def _sync_apply_body(self, job, review):
+        progress = self._sync_progress(job)
+        cleanup, organize = review.get("cleanup"), review.get("organize")
+        cleanup_applied = False
+        try:
+            current = self._compute_review()
+            if current["review_hash"] != review["review_hash"]:
+                self._sync_back_to_review(job, "plan_changed",
+                                          "The library changed. Review the updated changes.")
+                return
+            if cleanup:
+                self._sync_set_stage(job, "cleanup")
+                self.op_cleanup_apply(cleanup["plan_hash"], progress=progress)
+                cleanup_applied = True
+            if organize:
+                self._sync_set_stage(job, "organize")
+                removed = {row["path"] for row in (cleanup or {}).get("preview", {}).get("removals", [])}
+                expected = [m for m in organize["preview"]["moves"] if m["src"] not in removed]
+                fresh = self.op_organize_plan()
+                if canonical(fresh["preview"]["moves"]) != canonical(expected):
+                    self._sync_back_to_review(
+                        job, "partial_applied",
+                        "Old versions were deleted. Folder moves changed and need a new review.")
+                    return
+                if expected:
+                    self.op_organize_apply(fresh["plan_hash"], progress=progress)
+            with self._job_lock:
+                job["result"]["review"] = None
+                job["result"]["applied"] = review["count"]
+            self._sync_finish(job, "completed")
+        except Drift:
+            if cleanup_applied:
+                self._sync_back_to_review(job, "partial_applied",
+                                          "Old versions were deleted. Folder moves changed and need a new review.")
+            else:
+                self._sync_back_to_review(job, "plan_changed",
+                                          "The library changed. Review the updated changes.")
+        except BaseException as exc:
+            prefix = "Old versions were deleted, but moving folders failed: " if cleanup_applied else ""
+            self._sync_finish(job, "failed", prefix + str(exc),
+                              "partial_applied" if cleanup_applied else "apply_failed")
+        finally:
+            self._sync_maybe_rerun(job)
+
+    def op_sync_cancel(self):
+        with self._job_lock:
+            job = self._sync
+            if not job or job["status"] not in ("queued", "running", "review"):
+                raise SafetyError("no active sync")
+            if job["status"] == "running" and job["stage"] in ("validate", "cleanup", "organize"):
+                raise Busy("file changes are being applied", job_id=job["id"])
+            child = self._child if job["status"] == "running" else None
+            job.update(status="cancelled", error="cancelled by user", finished_at=time.time())
+            self._sync_rerun = False
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        return {"cancelled": job["id"]}
+
     def prepare_restart(self):
         """Atomically close new admissions once all owned work has drained."""
         with self._job_lock:
             active_job = self._job and self._job.get("status") in ("queued", "running")
             active_action = self._action and self._action.get("status") in ("queued", "running")
-            if active_job or active_action:
-                active = self._job if active_job else self._action
+            active_sync = self._sync_active()
+            if active_job or active_action or active_sync:
+                active = self._job if active_job else self._action if active_action else self._sync
                 raise Busy("backend has an active operation",
                            job_id=active.get("id") if active else None)
             self._admissions_closed = True
@@ -1033,10 +1287,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     @property
     def service(self):
-        return self.server.service
+        server = self.server
+        assert isinstance(server, _Server)
+        return server.service
 
     def _port(self):
-        return self.server.server_address[1]
+        address = self.server.server_address
+        return address[1] if isinstance(address, tuple) else None
 
     def _send_json(self, obj, status=200):
         body = canonical(obj).encode("utf-8")
@@ -1053,8 +1310,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-    def log_message(self, fmt, *args):
-        pass
+    def log_message(self, format, *args):  # noqa: A002 - matches the base signature
+        return
 
     def _reject(self, status, error, **extra):
         self._send_json({"error": error, **extra}, status)
@@ -1157,6 +1414,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "/api/organize/apply": (["plan_hash", "csrf"], ()),
             "/api/enrich/start": (["csrf"], ()),
             "/api/enrich/cancel": (["csrf"], ()),
+            "/api/sync/start": (["csrf"], ("trigger",)),
+            "/api/sync/apply": (["csrf", "review_hash"], ()),
+            "/api/sync/cancel": (["csrf"], ()),
             "/api/storage/prepare-restart": (["csrf"], ()),
             "/api/favorites": (["asset_key", "csrf", "favorite"], ()),
             "/api/package-favorites/save": (["csrf", "package"], ()),
@@ -1190,6 +1450,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"job_id": service.op_enrich_start()}, 202)
             elif path == "/api/enrich/cancel":
                 self._send_json(service.op_enrich_cancel())
+            elif path == "/api/sync/start":
+                self._send_json(service.op_sync_start(body.get("trigger", "manual")), 202)
+            elif path == "/api/sync/apply":
+                self._send_json(service.op_sync_apply(body["review_hash"]), 202)
+            elif path == "/api/sync/cancel":
+                self._send_json(service.op_sync_cancel())
             elif path == "/api/storage/prepare-restart":
                 self._send_json(service.prepare_restart())
             elif path == "/api/favorites":
