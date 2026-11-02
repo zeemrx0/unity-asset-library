@@ -42,6 +42,7 @@ test: python
 	node tests/test_updates.cjs
 	node tests/test-updates-electron.cjs
 	node tests/test_update_install.cjs
+	node tests/test-sync-watcher.cjs
 	$(PYTHON) -m unittest discover -s tests
 
 pack:

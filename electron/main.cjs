@@ -849,6 +849,9 @@ function registerIpc() {
   ipcMain.handle("backend:organize-apply", (_event, planHash) => postJson("/api/organize/apply", { plan_hash: planHash }));
   ipcMain.handle("backend:enrich-start", () => postJson("/api/enrich/start"));
   ipcMain.handle("backend:enrich-cancel", () => postJson("/api/enrich/cancel"));
+  ipcMain.handle("backend:sync-start", () => postJson("/api/sync/start", { trigger: "manual" }));
+  ipcMain.handle("backend:sync-apply", (_event, reviewHash) => postJson("/api/sync/apply", { review_hash: reviewHash }));
+  ipcMain.handle("backend:sync-cancel", () => postJson("/api/sync/cancel"));
   ipcMain.handle("backend:job", (_event, jobId) => backendRequest(`/api/job/${encodeURIComponent(jobId)}`));
   ipcMain.handle("backend:action", (_event, actionId) => backendRequest(`/api/action/${encodeURIComponent(actionId)}`));
   ipcMain.handle("storage:get", () => getStorage());
@@ -923,7 +926,52 @@ function createWindow() {
   else window.loadFile(path.join(app.getAppPath(), "dist", "renderer", "index.html"));
 }
 
+// Auto-sync: watch the active library and ask the backend to sync after archive
+// changes, shortly after a backend session starts, and when the window regains
+// focus (at most every 10 minutes). The backend coalesces overlapping requests.
+const { createSyncWatcher } = require("./sync-watcher.cjs");
+const FOCUS_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+let syncWatcher = null;
+let syncWatchKey = "";
+let syncStartTimer = null;
+let lastFocusSync = 0;
+
+async function triggerAutoSync() {
+  if (!backendSession || quitting) return;
+  try {
+    await postJson("/api/sync/start", { trigger: "auto" });
+  } catch {
+    // Busy or offline: the next change, focus or session start retries.
+  }
+}
+
+function closeSyncWatcher() {
+  if (syncStartTimer) clearTimeout(syncStartTimer);
+  syncStartTimer = null;
+  if (syncWatcher) syncWatcher.close();
+  syncWatcher = null;
+  syncWatchKey = "";
+}
+
+function refreshSyncWatcher() {
+  const key = backendSession && !quitting ? `${backendSession.vaultRoot}:${backendSession.generation}` : "";
+  if (key === syncWatchKey) return;
+  closeSyncWatcher();
+  if (!key) return;
+  syncWatchKey = key;
+  syncWatcher = createSyncWatcher({ root: backendSession.vaultRoot, onTrigger: () => void triggerAutoSync() });
+  syncStartTimer = setTimeout(() => { syncStartTimer = null; void triggerAutoSync(); }, 5000);
+  lastFocusSync = Date.now();
+}
+
+app.on("browser-window-focus", () => {
+  if (Date.now() - lastFocusSync < FOCUS_SYNC_INTERVAL_MS) return;
+  lastFocusSync = Date.now();
+  void triggerAutoSync();
+});
+
 app.whenReady().then(() => {
+  setInterval(refreshSyncWatcher, 2000);
   if (!app.isPackaged && app.dock) {
     app.dock.setIcon(path.join(app.getAppPath(), "assets", "icons", "icon.png"));
   }
@@ -957,6 +1005,7 @@ app.on("before-quit", (event) => {
     if (choice !== 1) { updateRestart = false; return; }
   }
   quitting = true;
+  closeSyncWatcher();
   downloadController?.abort(new Error("Package download cancelled because the application is closing."));
   if (pendingPortChoice) answerPortChoice(pendingPortChoice.id, { action: "cancel" });
   void Promise.allSettled([startupPromise, saveQueue, importPromise, packageInstallPromise, downloadPromise, transitionPromise || Promise.resolve()])
