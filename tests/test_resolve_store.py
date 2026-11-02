@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Tests index Optional results right after asserting on them; a None is a test
+# failure, which unittest reports. Pyright's Optional checks add noise here.
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false, reportArgumentType=false, reportCallIssue=false
 """Phase 2 tests. Hermetic — every network shape comes from a captured fixture.
 
 Run:  python3 -m unittest discover -s tests -v
@@ -1189,9 +1192,10 @@ class TestCandidateSelection(unittest.TestCase):
         self.assertEqual((rec["status"], rec["id"]), ("resolved", "2"))
         self.assertNotIn("store_name", rec)
 
-    def test_duplicate_listing_is_not_a_rival(self):
+    def test_two_listings_with_one_name_abstain(self):
+        """Separate store ids can share a name; the owner's listing is unknowable."""
         rec = self._verify("Sci-Fi Scenes", {1: "Sci-Fi Scenes", 2: "Sci-Fi Scenes"})
-        self.assertEqual((rec["status"], rec["id"]), ("resolved", "1"))
+        self.assertEqual((rec["status"], rec["reason"]), ("unverified", "ambiguous"))
 
     def test_two_different_products_passing_equally_abstain(self):
         rec = self._verify("POLYGON NatureBiomes MeadowForest",

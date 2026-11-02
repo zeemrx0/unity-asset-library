@@ -723,14 +723,13 @@ def verify_candidates(asset, ids, session=None, sleep=None):
             rec["detail"] = prefetched
         passed.append(rec)
 
-    # Two DIFFERENT products that both pass the identity gate is ambiguity, not a
-    # match: they differ only in word order, which similarity cannot judge. Abstain.
-    # Duplicate listings of one name are not rivals.
+    # Two DIFFERENT store ids that both pass the identity gate is ambiguity, not a
+    # match: separate listings can share a name or differ only in word order, and
+    # nothing here can tell which one the user owns. Abstain.
     passed.sort(key=lambda r: r["score"], reverse=True)
     if passed:
         best = passed[0]
-        rivals = [r for r in passed[1:]
-                  if normalize(r["store_name"]) != normalize(best["store_name"])]
+        rivals = [r for r in passed[1:] if r["id"] != best["id"]]
         if rivals:
             return {"status": "unverified", "title": title, "reason": "ambiguous",
                     "candidates_rejected": attempts + [
