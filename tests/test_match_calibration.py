@@ -16,7 +16,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 
-import resolve_store as rs  # noqa: E402
+import resolve_store as rs  # pyright: ignore[reportMissingImports]  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "match_calibration.json")
 

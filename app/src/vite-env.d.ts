@@ -26,7 +26,9 @@ declare global {
   type StorageState = { path: string | null; ready: boolean; needsSetup: boolean; error: string | null; canChange: boolean; busy: boolean; progress: ProgressSnapshot | null; portRecovery: PortRecovery | null };
   type Job = ProgressSnapshot & { id: string; kind?: string; phase?: string; status: string; remaining?: number | null; error?: string | null; error_code?: string | null } | null;
   type ActionJob = ProgressSnapshot & { id: string; kind: "resync" | "cleanup" | "organize"; phase: "plan" | "apply"; status: string; result?: ActionResult | null; error?: string | null; error_code?: string | null };
-  type State = { service: string; api_version?: number; ready: boolean; csrf: string; pending_enrichment: number; job: Job; action: ActionJob | null; vault_root: string; repo: string; instance_id: string };
+  type SyncReview = { review_hash: string; count: number; unavailable: string[]; cleanup: { preview: ActionPreview; plan_hash: string } | null; organize: { preview: ActionPreview; plan_hash: string } | null };
+  type SyncJob = ProgressSnapshot & { id: string; kind: "sync"; trigger: "manual" | "auto"; status: "queued" | "running" | "review" | "completed" | "failed" | "cancelled"; remaining?: number | null; error?: string | null; error_code?: string | null; result?: { index?: { added: number; removed: number; resized: number }; pending_after?: number | null; review?: SyncReview | null; applied?: number } | null };
+  type State = { service: string; api_version?: number; ready: boolean; csrf: string; pending_enrichment: number; job: Job; action: ActionJob | null; sync?: SyncJob | null; vault_root: string; repo: string; instance_id: string };
   type PlanRow = { path?: string; src?: string; dst?: string; size_bytes?: number; previous_size_bytes?: number };
   type CleanupFamily = { asset_key: string; reason: string; survivor: PlanRow | null; removals: PlanRow[] };
   type ActionPreview = { families?: CleanupFamily[]; additions?: PlanRow[]; removals?: PlanRow[]; resized?: PlanRow[]; moves?: PlanRow[]; totals?: Record<string, number> };
@@ -71,6 +73,9 @@ declare global {
     organizeApply: (planHash: string) => Promise<{ job_id: string }>;
     enrichStart: () => Promise<{ job_id: string }>;
     enrichCancel: () => Promise<ActionResult>;
+    syncStart: () => Promise<{ job_id: string; coalesced: boolean }>;
+    syncApply: (reviewHash: string) => Promise<{ job_id: string }>;
+    syncCancel: () => Promise<{ cancelled: string }>;
     getJob: (jobId: string) => Promise<{ job: Job }>;
     getAction: (actionId: string) => Promise<{ action: ActionJob }>;
     getPreferences: () => Promise<Preferences>;

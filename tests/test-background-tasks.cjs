@@ -7,15 +7,15 @@ const os = require('node:os');
 const path = require('node:path');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ual-task-dropdown-'));
 app.setPath('userData', path.join(temp, 'profile'));
-const action = { id: 'sync', kind: 'resync', phase: 'plan', status: 'completed', stage: 'scan', total: 10, completed: 10 };
+const sync = { id: 'sync', kind: 'sync', trigger: 'manual', status: 'completed', stage: 'review', total: 10, completed: 10, result: { index: { added: 1, removed: 0, resized: 0 }, review: null } };
 const enrichment = { id: 'enrichment', kind: 'enrich', status: 'completed', remaining: 2, stage: 'enrich', total: 8, completed: 8 };
 const imported = { id: 'import', kind: 'import', status: 'failed', error: 'Archive unavailable', total: 1, completed: 0, results: [] };
 const packages = { id: 'packages', kind: 'packages', status: 'running', total: 1, completed: 0, project: '/fixture/project', results: [{ id: 'math', label: 'Math', status: 'installing' }] };
 const preload = path.join(temp, 'preload.cjs');
 fs.writeFileSync(preload, `require('electron').contextBridge.exposeInMainWorld('ual', {
   getStorage: async () => ({ path: '/fixture', ready: true, canChange: true, busy: false }),
-  getState: async () => ({ ready: true, vault_root: '/fixture', pending_enrichment: 2, action: ${JSON.stringify(action)}, job: ${JSON.stringify(enrichment)} }),
-  getAction: async () => ({ action: ${JSON.stringify(action)} }),
+  getState: async () => ({ ready: true, vault_root: '/fixture', pending_enrichment: 2, action: null, sync: ${JSON.stringify(sync)}, job: ${JSON.stringify(enrichment)} }),
+  getAction: async () => ({ action: null }),
   getAssets: async () => ({ assets: [] }), favorites: async () => ({ favorites: [] }),
   getTags: async () => ({ tags: [], assignments: {} }),
   getPreferences: async () => ({ theme: 'dark' }), setPreferences: async prefs => prefs,
@@ -72,7 +72,9 @@ app.whenReady().then(async () => {
     await click('#background-tasks > .progress-heading');
     assert.equal(await evaluate(`!!document.querySelector('#background-tasks')`), true, 'Clicks inside keep the task dropdown open');
     const text = await evaluate(`document.querySelector('#background-tasks').textContent`);
-    for (const label of ['Resync', 'Enrich', 'Import', 'Installing packages', 'Archive unavailable', '2 assets still need enrichment']) assert(text.includes(label), label);
+    assert.equal(await evaluate(`document.querySelectorAll('.sync-button').length`), 1, 'One Sync button');
+    assert.equal(await evaluate(`!!document.querySelector('#library-actions, .library-action')`), false, 'No Library actions menu');
+    for (const label of ['Sync', 'Enrich', 'Import', 'Installing packages', 'Archive unavailable', '2 assets still need enrichment']) assert(text.includes(label), label);
     assert.equal(await evaluate(`document.querySelectorAll('.content-column .progress-panel, .content-column .favorite-package-progress').length`), 0);
     for (const [width, height] of [[800, 600], [1200, 800], [1440, 900]]) {
       win.setSize(width, height);
@@ -80,7 +82,7 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate(`(() => { const r = document.querySelector('.task-details').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; })()`), true, `Dropdown fits ${width}x${height}`);
     }
     await fs.promises.writeFile(path.join(os.tmpdir(), 'ual-background-tasks.png'), (await win.webContents.capturePage()).toPNG());
-    await click('[aria-label="Dismiss Resync · Preview result"]');
+    await click('[aria-label="Dismiss Sync result"]');
     await click('[aria-label="Dismiss Enrich result"]');
     await click('[aria-label="Dismiss Import result"]');
     await waitFor(`document.querySelector('.task-indicator')?.getAttribute('aria-label').includes('1 total')`);

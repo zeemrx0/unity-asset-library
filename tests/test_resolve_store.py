@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 # Never touch this machine's real application data.
 os.environ.setdefault("UAL_APP_DATA", tempfile.mkdtemp(prefix="ual-test-app-data-"))
 
-import resolve_store as rs  # noqa: E402
+import resolve_store as rs  # pyright: ignore[reportMissingImports]  # noqa: E402
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -1040,7 +1040,7 @@ class TestPendingResolveScope(unittest.TestCase):
     def _run(self, args, assets, cache=None, queue=None, resolve_fn=None):
         import fcntl
         from unittest import mock
-        import index_assets as ia
+        import index_assets as ia  # pyright: ignore[reportMissingImports]
         self._write("assets.json", {"assets": assets})
         if cache is not None:
             self._write("cache.json", cache)
@@ -1293,7 +1293,7 @@ class TestCacheWriteLock(unittest.TestCase):
     def _start(self):
         import tempfile
         from unittest import mock
-        import index_assets as ia
+        import index_assets as ia  # pyright: ignore[reportMissingImports]
         self._write("assets.json", {"assets": [self._asset("a")]})
         self._write("cache.json", {"resolved": {"a": {"status": "resolved"}}})
         self.patchers = [

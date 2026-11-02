@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type RefObject,
 } from "react";
 import {
   Alert,
@@ -28,7 +27,6 @@ import {
 import {
   ArrowLeft,
   ArrowRight,
-  ChevronDown,
 
   CircleSlash,
   CircleCheck,
@@ -56,6 +54,8 @@ import {
 } from "lucide-react";
 import FavoritePackages, { PackageInstallProgress } from "./components/FavoritePackages";
 import AssetContextMenu, { type AssetContextAction } from "./components/asset-context-menu";
+import { SyncReviewDialog } from "./components/sync-review-dialog";
+import { formatBytes } from "./format-bytes";
 import { ImportDialog, availabilityLabel, availabilitySummary, unityPackages } from "./components/ImportDialog";
 import SpotlightCard from "./components/react-bits/SpotlightCard";
 import GlideSelect from "./components/react-bits/GlideSelect";
@@ -67,29 +67,11 @@ import SpringCheck from "./components/react-bits/SpringCheck";
 type QuickFilter = "all" | "favorites" | "pending" | "flagged" | "non-store";
 type ViewMode = "grid" | "list";
 type SortMode = "name" | "author" | "size";
-type DialogState = {
-  mode: "resync" | "cleanup" | "organize";
-  title: string;
-  result: ActionResult;
-} | null;
-
 const api = window.ual;
 const shortcutModifier = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 function isTextEditing(target: EventTarget | null) {
   return target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest("input:not([type=checkbox]):not([type=radio]), textarea, select, [role=combobox], [role=textbox]")));
-}
-
-function formatBytes(bytes: number) {
-  if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  return `${value.toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
 function assetSize(asset: Asset) {
@@ -225,6 +207,7 @@ const PROGRESS_STAGE_LABELS: Record<string, string> = {
   prepare: "Preparing changes", validate: "Validating files",
   stage: "Staging files for cleanup", move: "Moving files", remove: "Removing files",
   rollback: "Rolling back changes", refresh: "Refreshing index",
+  match: "Matching Store listings", review: "Planning file changes", cleanup: "Deleting old versions", organize: "Moving files",
   resolve: "Looking up store details", enrich: "Merging store details", merge: "Merging store details",
   "refreshing index": "Refreshing index", "index refreshed": "Index refreshed",
   "index refresh failed": "Index refresh failed",
@@ -232,7 +215,7 @@ const PROGRESS_STAGE_LABELS: Record<string, string> = {
   unknown: "Outcome unknown", "outcome unknown": "Outcome unknown",
 };
 
-const PROGRESS_COUNT_LABELS: Record<string, string> = { no_result: "no search match", unverified: "unverified matches", remaining: "still need enrichment", moved: "files moved", skipped: "files skipped", staged: "files staged", removed: "files deleted", rolled_back: "files rolled back", rollback_failed: "rollback failures", resolved: "resolved", failed: "failed", blocked: "blocked", installed: "packages installed", cancelled: "packages cancelled", index_added: "index entries added", index_removed: "index entries removed", index_resized: "index entries resized", inventory_examined: "inventory examined", inventory_found: "inventory found" };
+const PROGRESS_COUNT_LABELS: Record<string, string> = { no_result: "no search match", unverified: "unverified matches", remaining: "still need enrichment", moved: "files moved", skipped: "files skipped", staged: "files staged", removed: "files deleted", rolled_back: "files rolled back", rollback_failed: "rollback failures", resolved: "resolved", failed: "failed", blocked: "blocked", installed: "packages installed", cancelled: "packages cancelled", index_added: "index entries added", index_removed: "index entries removed", index_resized: "index entries resized", added: "files added", inventory_examined: "inventory examined", inventory_found: "inventory found" };
 
 function ActionProgress({ job, onDismiss, announce = true, onReview }: ProgressProps) {
   const [now, setNow] = useState(() => Date.now());
@@ -247,13 +230,13 @@ function ActionProgress({ job, onDismiss, announce = true, onReview }: ProgressP
   const percent = total === null ? undefined : total === 0 ? 0 : Math.min(100, Math.round((completed / total) * 100));
   const terminal = ["completed", "failed", "cancelled"].includes(job.status);
   const counts = job.counts || {};
-  const actionLabel = job.kind === "import" ? "Import" : job.kind === "resync" ? "Resync" : job.kind === "cleanup" ? "Cleanup" : job.kind === "organize" ? "Organize" : "Enrich";
-  const phaseLabel = job.kind === "enrich" || job.kind === "import" ? "" : " · " + (job.phase === "apply" ? "Apply" : "Preview");
+  const actionLabel = job.kind === "sync" ? "Sync" : job.kind === "import" ? "Import" : job.kind === "resync" ? "Resync" : job.kind === "cleanup" ? "Cleanup" : job.kind === "organize" ? "Organize" : "Enrich";
+  const phaseLabel = job.kind === "enrich" || job.kind === "import" || job.kind === "sync" ? "" : " · " + (job.phase === "apply" ? "Apply" : "Preview");
   const title = actionLabel + phaseLabel;
   const rawStage = (job.stage || (job.status === "queued" ? "waiting" : "working")).toLowerCase();
   const remaining = job.kind === "enrich" ? job.remaining ?? counts.remaining ?? 0 : 0;
   const incompleteEnrichment = job.status === "completed" && remaining > 0;
-  const outcome = incompleteEnrichment ? "Finished with unresolved assets" : job.status === "completed" ? "Completed" : job.status === "cancelled" ? "Cancelled" : job.status === "failed" ? "Failed" : job.status === "queued" ? "Queued" : "In progress";
+  const outcome = job.status === "review" ? "Waiting for your review" : incompleteEnrichment ? "Finished with unresolved assets" : job.status === "completed" ? "Completed" : job.status === "cancelled" ? "Cancelled" : job.status === "failed" ? "Failed" : job.status === "queued" ? "Queued" : "In progress";
   const stage = PROGRESS_STAGE_LABELS[rawStage] ?? job.stage ?? "Working";
   const unknownProgress = rawStage.includes("scan") ? completed + " files found" : completed + " processed · total unknown";
   const result = job.result as ActionResult | null | undefined;
@@ -418,7 +401,6 @@ function App() {
   const prefsHydratedRef = useRef(false);
   const prefsSaveChainRef = useRef(Promise.resolve());
   const libraryRootRef = useRef<string | null>(null);
-  const [actionStatus, setActionStatus] = useState<ActionJob | null>(null);
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [query, setQuery] = useState(DEFAULT_FILTERS.query);
@@ -457,11 +439,10 @@ function App() {
     savePreferencesNow();
   }, [theme]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [enrichCancelling, setEnrichCancelling] = useState(false);
+  const [syncStarting, setSyncStarting] = useState(false);
   const [error, setError] = useState("");
-  const [dialog, setDialog] = useState<DialogState>(null);
-  const [actionsOpen, setActionsOpen] = useState(false);
+  const [syncReviewOpen, setSyncReviewOpen] = useState(false);
+  const [syncReviewError, setSyncReviewError] = useState("");
   const [tasksOpen, setTasksOpen] = useState(false);
   const tasksTriggerRef = useRef<HTMLButtonElement>(null);
   const keyboardGuideRef = useRef<HTMLButtonElement>(null);
@@ -492,21 +473,14 @@ function App() {
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const importReturnRef = useRef<HTMLElement>(null);
 
-  const actionTriggerRef = useRef<HTMLButtonElement>(null);
-  const actionRequestRef = useRef(false);
-  const uiRefreshRef = useRef(false);
-  const actionGenerationRef = useRef(0);
-  const dismissedRef = useRef(dismissedIds);
-  dismissedRef.current = dismissedIds;
+  const syncTriggerRef = useRef<HTMLButtonElement>(null);
   const prefsRef = useRef<Preferences>({});
   prefsRef.current = {
     theme,
     sort,
     view,
     filters: { query, category, quick, author, selectedTags, tagMode, untagged },
-    action: actionStatus && !dismissedIds.has(actionStatus.id) && !["completed", "failed", "cancelled"].includes(actionStatus.status)
-      ? { id: actionStatus.id, kind: actionStatus.kind, phase: actionStatus.phase }
-      : null,
+    action: null,
   };
   const [packageJob, setPackageJob] = useState<PackageInstallJob | null>(null);
   const [packageJobError, setPackageJobError] = useState("");
@@ -573,23 +547,6 @@ function App() {
   const [tagBusy, setTagBusy] = useState(false);
   const tagBusyRef = useRef(false);
   const tagRevRef = useRef(0);
-  useEffect(() => {
-    if (!actionsOpen) return;
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (
-        target instanceof Element &&
-        target.closest(".top-actions, #library-actions")
-      ) {
-        return;
-      }
-      setActionsOpen(false);
-    }
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-    };
-  }, [actionsOpen]);
   function savePreferencesNow(extra?: Partial<Preferences>) {
     if (!prefsHydratedRef.current || !libraryRootRef.current) return;
     const prefs = { ...prefsRef.current, ...extra };
@@ -655,7 +612,6 @@ function App() {
       setState(nextState);
       if (favRev === favRevRef.current) setFavorites(nextFavorites.favorites || []);
       if (tagRev === tagRevRef.current) { setUserTags(nextTags); setTagError(""); }
-      let savedIdentity: ActionIdentity | null = null;
       try {
         let prefs: Preferences = await api.getPreferences();
         if (epoch !== storageEpochRef.current) return false;
@@ -680,7 +636,6 @@ function App() {
           }
         }
         applyPreferences(prefs);
-        savedIdentity = prefs.action ? { id: prefs.action.id, kind: prefs.action.kind, phase: prefs.action.phase } : null;
         libraryRootRef.current = nextState.vault_root;
         prefsHydratedRef.current = true;
       } catch (prefsCause) {
@@ -688,8 +643,6 @@ function App() {
           setError(prefsCause instanceof Error ? prefsCause.message : "Preferences could not be loaded; defaults are in use and changes will not be saved.");
         }
       }
-      if (!uiRefreshRef.current && nextState.action && !dismissedRef.current.has(nextState.action.id)) setActionStatus(nextState.action);
-      else if (!uiRefreshRef.current && savedIdentity && (!nextState.action || nextState.action.id !== savedIdentity.id)) setActionStatus({ id: savedIdentity.id, kind: savedIdentity.kind, phase: savedIdentity.phase, status: "running", stage: "Recovering operation", completed: 0, total: null, current_item: null, counts: {} });
       setAssets(nextIndex.assets || []);
       setSelectedKey((current) => current && nextIndex.assets.some((asset) => asset.asset_key === current) ? current : nextIndex.assets[0]?.asset_key || null);
       loaded = true;
@@ -705,7 +658,8 @@ function App() {
     return loaded;
   }
 
-  const libraryActivity = Boolean(busy) || importActive || Boolean(state?.job && ["queued", "running"].includes(state.job.status)) || Boolean(actionStatus && ["queued", "running"].includes(actionStatus.status));
+  const syncRunning = Boolean(state?.sync && ["queued", "running"].includes(state.sync.status));
+  const libraryActivity = syncStarting || syncRunning || importActive || Boolean(state?.job && ["queued", "running"].includes(state.job.status)) || Boolean(state?.action && ["queued", "running"].includes(state.action.status));
   const storageChangeBlocked = storageBusy || storage?.canChange === false || libraryActivity || tagBusy;
 
   async function chooseStorageFolder() {
@@ -803,7 +757,6 @@ function App() {
       setStoragePath(nextStorage.path || nextPath);
       setStorageView("library");
       setStorageError("");
-      actionGenerationRef.current += 1;
       setSelectedKey(null);
       setQuery("");
       setCategory("All assets");
@@ -815,15 +768,13 @@ function App() {
       setUserTags(null);
       setTagError("");
       setState(null);
-      setActionStatus(null);
-      setDialog(null);
+      setSyncReviewOpen(false);
       setDismissedIds(new Set());
       prefsHydratedRef.current = false;
       prefsSaveChainRef.current = Promise.resolve();
       setSort("name");
       setView("grid");
       setTheme("system");
-      actionGenerationRef.current += 1;
       setLoading(true);
       await load();
     } catch (cause) {
@@ -863,39 +814,35 @@ function App() {
       return next.length === current.length ? current : next;
     });
   }, [userTags]);
+  // Poll while a sync runs (auto syncs start in the background), refresh the
+  // library when one finishes, and slow-poll otherwise to notice auto syncs.
+  const syncSeenRef = useRef("");
   useEffect(() => {
-    const job = actionStatus;
-    if (!job || dismissedRef.current.has(job.id)) return;
-    const generation = ++actionGenerationRef.current;
+    if (!storage?.ready || storageBusy) return;
     let stopped = false;
+    let inFlight = false;
     const poll = async () => {
-      if (stopped || actionRequestRef.current) return;
-      actionRequestRef.current = true;
+      if (stopped || inFlight) return;
+      inFlight = true;
       try {
-        const next = (await api.getAction(job.id)).action;
-        if (stopped || generation !== actionGenerationRef.current || dismissedRef.current.has(job.id)) return;
-        setActionStatus(next);
-        setState((current) => current ? { ...current, action: next } : current);
-        if (["completed", "failed", "cancelled"].includes(next.status)) { stopped = true; window.clearInterval(timer); }
-      } catch (cause) {
-        const details = cause as { status?: number; code?: string };
-        const missing = details.status === 404 || details.code === "unknown_action" || (cause instanceof Error && /unknown[_ ]action/i.test(cause.message));
-        if (missing) {
-          stopped = true;
-          window.clearInterval(timer);
-          setActionStatus((current) => current && current.id === job.id ? { ...current, status: "failed", stage: "Outcome unknown", error: "This operation is no longer known to the backend. Its outcome is unknown; no automatic retry was attempted.", error_code: "unknown_action" } : current);
-        } else if (!stopped && generation === actionGenerationRef.current) {
-          setActionStatus((current) => current && current.id === job.id ? { ...current, error: "Connection interrupted while checking this operation; retrying…", error_code: "connection_lost" } : current);
-          setError(cause instanceof Error ? cause.message : "Connection interrupted while checking action progress; retrying.");
+        const next = await api.getState();
+        if (stopped) return;
+        setState(next);
+        const sync = next.sync;
+        const marker = sync ? `${sync.id}:${sync.status}` : "";
+        if (marker !== syncSeenRef.current) {
+          const previous = syncSeenRef.current;
+          syncSeenRef.current = marker;
+          if (previous && sync && ["completed", "review"].includes(sync.status)) await load();
         }
-      } finally {
-        actionRequestRef.current = false;
-      }
+      } catch {
+        // load() reports connection errors; polling retries quietly.
+      } finally { inFlight = false; }
     };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 900);
+    const fast = Boolean(state?.sync && ["queued", "running"].includes(state.sync.status));
+    const timer = window.setInterval(() => void poll(), fast ? 900 : 5000);
     return () => { stopped = true; window.clearInterval(timer); };
-  }, [actionStatus?.id]);
+  }, [storage?.ready, storageBusy, storageEpoch, state?.sync?.id, state?.sync?.status]);
 
   useEffect(() => {
     const job = state?.job;
@@ -908,7 +855,6 @@ function App() {
       try {
         const next = await api.getState();
         if (!stopped) setState(next);
-        if (!stopped && next.job && !["queued", "running"].includes(next.job.status)) setEnrichCancelling(false);
         if (!stopped && next.job?.status === "completed") await load();
       } catch (cause) {
         if (!stopped) setError(cause instanceof Error ? cause.message : "Could not read enrichment progress.");
@@ -1075,7 +1021,7 @@ function App() {
     }
   }, [filtered, focusedAssetKey]);
   useEffect(() => {
-    if (storageView !== "library" || storage?.portRecovery || dialog || actionsOpen || importOpen || shortcutsOpen) return;
+    if (storageView !== "library" || storage?.portRecovery || syncReviewOpen || importOpen || shortcutsOpen) return;
     const onShortcut = (event: KeyboardEvent) => {
       if (assetContext || event.defaultPrevented || event.isComposing || event.altKey || event.repeat) return;
       if (document.querySelector("[role=dialog], [role=alertdialog], [role=listbox], [role=menu]")) return;
@@ -1101,9 +1047,9 @@ function App() {
     };
     document.addEventListener("keydown", onShortcut);
     return () => document.removeEventListener("keydown", onShortcut);
-  }, [storageView, storage?.portRecovery, dialog, actionsOpen, importOpen, shortcutsOpen, importSelection, importActive, loading, storageBusy, inspectorOpen, assetContext]);
+  }, [storageView, storage?.portRecovery, syncReviewOpen, importOpen, shortcutsOpen, importSelection, importActive, loading, storageBusy, inspectorOpen, assetContext]);
   function onBrowserKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-    if (assetContext || event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || isTextEditing(event.target) || dialog || actionsOpen || importOpen || shortcutsOpen) return;
+    if (assetContext || event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || isTextEditing(event.target) || syncReviewOpen || importOpen || shortcutsOpen) return;
 
     const target = event.target as HTMLElement;
     if (!target.matches("[data-asset-key]")) return;
@@ -1216,7 +1162,7 @@ function App() {
   }
 
   function openAssetContextMenu(asset: Asset, trigger: HTMLElement, point?: { x: number; y: number }) {
-    if (storageBusy || loading || dialog || actionsOpen || importOpen || shortcutsOpen) return;
+    if (storageBusy || loading || syncReviewOpen || importOpen || shortcutsOpen) return;
     trigger.focus();
     const bounds = trigger.getBoundingClientRect();
     setAssetContext({ assetKey: asset.asset_key, trigger, x: point?.x ?? bounds.left, y: point?.y ?? bounds.bottom, keyboard: !point });
@@ -1303,112 +1249,59 @@ function App() {
     return counts;
   }, [userTags]);
 
-  async function runAction(name: "resync" | "cleanup" | "organize") {
+  async function startSync() {
+    if (libraryActivity) return;
+    setSyncStarting(true);
+    setError("");
     try {
-      setBusy(name);
-      setError("");
-      const response = name === "resync" ? await api.resync() : name === "cleanup" ? await api.cleanupPlan() : await api.organizePlan();
-      savePreferencesNow({ action: { id: response.job_id, kind: name, phase: "plan" } });
-      setActionStatus({ id: response.job_id, kind: name, phase: "plan", status: "queued", stage: "Starting", completed: 0, total: null, current_item: null, counts: {} });
+      await api.syncStart();
+      setState(await api.getState());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The action could not start.");
-      setBusy(null);
+      setError(cause instanceof Error ? cause.message : "Sync could not start.");
+    } finally { setSyncStarting(false); }
+  }
+
+  async function applySyncReview() {
+    const review = state?.sync?.result?.review;
+    if (!review) return;
+    setSyncReviewError("");
+    try {
+      await api.syncApply(review.review_hash);
+      setState(await api.getState());
+    } catch (cause) {
+      setSyncReviewError(cause instanceof Error && /plan_changed/.test(cause.message)
+        ? "The library changed. Review the updated changes."
+        : cause instanceof Error ? cause.message : "The changes could not be applied.");
     }
   }
 
-  async function startEnrich() {
+  async function discardSyncReview() {
     try {
-      setBusy("enrich");
-      setError("");
-      await api.enrichStart();
-      const next = await api.getState();
-      setState(next);
+      await api.syncCancel();
+      setState(await api.getState());
+      setSyncReviewOpen(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Enrichment could not start.");
-    } finally { setBusy(null); }
-  }
-
-  async function cancelEnrich() {
-    setEnrichCancelling(true);
-    try {
-      await api.enrichCancel();
-      const next = await api.getState();
-      setState(next);
-      if (!next.job || !["queued", "running"].includes(next.job.status)) setEnrichCancelling(false);
-    } catch (cause) {
-      setEnrichCancelling(false);
-      setError(cause instanceof Error ? cause.message : "Enrichment could not be cancelled.");
+      setSyncReviewError(cause instanceof Error ? cause.message : "The review could not be dismissed.");
     }
   }
 
-  async function confirmDialog() {
-    if (!dialog?.result.plan_hash || busy) return;
-    try {
-      setBusy(dialog.mode);
-      setError("");
-      const response = dialog.mode === "resync" ? await api.resyncApply(dialog.result.plan_hash) : dialog.mode === "cleanup" ? await api.cleanupApply(dialog.result.plan_hash) : await api.organizeApply(dialog.result.plan_hash);
-      savePreferencesNow({ action: { id: response.job_id, kind: dialog.mode, phase: "apply" } });
-      setActionStatus({ id: response.job_id, kind: dialog.mode, phase: "apply", status: "queued", stage: "Starting", completed: 0, total: null, current_item: null, counts: {} });
-    } catch (cause) {
-      setBusy(null);
-      setError(cause instanceof Error ? cause.message : "The plan changed before it could be applied.");
-    }
-  }
-
-  const actionTerminalRef = useRef("");
-  useEffect(() => {
-    const job = actionStatus;
-    if (!job || !["completed", "failed", "cancelled"].includes(job.status)) return;
-    const marker = job.id + ":" + job.status;
-    if (actionTerminalRef.current === marker) return;
-    actionTerminalRef.current = marker;
-    savePreferencesNow({ action: null });
-    if (job.phase === "plan") {
-      setBusy(null);
-      if (job.status === "completed" && job.result) {
-        setDialog({ mode: job.kind as "resync" | "cleanup" | "organize", title: job.kind === "resync" ? "Review resync" : job.kind === "cleanup" ? "Clean up old versions" : "Review organization", result: job.result });
-      } else if (job.status === "failed") {
-        setError(job.error || job.error_code || "The preview failed.");
-      } else if (job.status === "cancelled") {
-        setError("The preview was cancelled.");
-      }
-      return;
-    }
-    if (job.phase !== "apply") return;
-    if (job.status === "completed") {
-      uiRefreshRef.current = true;
-      setActionStatus((current) => current && current.id === job.id ? { ...current, status: "running", stage: "Refreshing index", completed: 0, total: null, current_item: null } : current);
-      void (async () => {
-        const refreshed = await load();
-        uiRefreshRef.current = false;
-        setActionStatus((current) => current && current.id === job.id ? { ...current, status: refreshed ? "completed" : "failed", stage: refreshed ? "Index refreshed" : "Index refresh failed", error: refreshed ? current.error : "Changes completed, but refreshing the index failed. Verify the library before continuing." } : current);
-        if (refreshed) setDialog(null);
-        setBusy(null);
-      })();
-    } else {
-      setBusy(null);
-      if (job.error_code === "plan_changed" && job.result?.preview && job.result.plan_hash) {
-        setDialog((current) => current ? { ...current, result: job.result as ActionResult, title: "Review updated plan" } : current);
-        setError("The library changed. Review the fresh plan and confirm again.");
-      } else if (job.status === "failed") {
-        setError(job.error || job.error_code || "The action failed. No changes were applied unless the result says otherwise.");
-        setDialog((current) => current ? { ...current, result: { ...current.result, plan_hash: undefined } } : current);
-      }
-    }
-  }, [actionStatus?.id, actionStatus?.status, actionStatus?.phase]);
-
-  function dismissAction(id: string) {
+  function dismissSync(id: string) {
     setDismissedIds((current) => new Set(current).add(id));
-    setActionStatus((current) => current?.id === id ? null : current);
   }
   function dismissEnrich(id: string) {
     setDismissedIds((current) => new Set(current).add(id));
     setState((current) => current ? { ...current, job: null } : current);
   }
 
-  const jobRunning =
-    state?.job && ["queued", "running"].includes(state.job.status);
-  const visibleJobs = [actionStatus, state?.job, importJob, packageJob].filter((job) => job && !dismissedIds.has(job.id));
+  const syncJob = state?.sync ?? null;
+  const syncReview = syncJob?.status === "review" ? syncJob.result?.review ?? null : null;
+  const syncApplying = Boolean(syncJob && syncJob.status === "running" && ["validate", "cleanup", "organize"].includes(syncJob.stage || ""));
+  useEffect(() => {
+    if (syncJob?.status === "review" && syncJob.error_code) setSyncReviewError(syncJob.error || "");
+    if (syncJob?.status === "completed" && syncReviewOpen) setSyncReviewOpen(false);
+  }, [syncJob?.id, syncJob?.status, syncJob?.error_code]);
+  const syncVisible = syncJob && syncJob.status !== "review" ? syncJob : null;
+  const visibleJobs = [syncVisible, state?.job, importJob, packageJob].filter((job) => job && !dismissedIds.has(job.id));
   const taskCount = visibleJobs.length + Number(Boolean(downloadMessage)) + Number(Boolean(packageJobError));
   const runningTasks = visibleJobs.filter((job) => job && ["queued", "running"].includes(job.status)).length + Number(Boolean(downloadingAsset));
   const taskFailure = downloadFailed || Boolean(packageJobError) || visibleJobs.some((job) => job?.status === "failed");
@@ -1444,14 +1337,14 @@ function App() {
           </Input>
         <div className="top-actions">
           {taskCount > 0 && <Popover isOpen={tasksOpen} onClose={() => setTasksOpen(false)} finalFocusRef={tasksTriggerRef} placement="bottom right" offset={10} trigger={(triggerProps) => (
-            <Button type="button" {...triggerProps} ref={(node) => { tasksTriggerRef.current = node; const ref = triggerProps.ref; if (typeof ref === "function") ref(node); else if (ref) ref.current = node; }} className="icon-button task-indicator" data-status={taskFailure ? "failed" : runningTasks ? "running" : "completed"} aria-label={`Background tasks: ${runningTasks} running, ${taskCount} total${taskFailure ? ", needs attention" : ""}`} aria-expanded={tasksOpen} aria-controls="background-tasks" onPress={() => { setActionsOpen(false); setTasksOpen((open) => !open); }}>
+            <Button type="button" {...triggerProps} ref={(node) => { tasksTriggerRef.current = node; const ref = triggerProps.ref; if (typeof ref === "function") ref(node); else if (ref) ref.current = node; }} className="icon-button task-indicator" data-status={taskFailure ? "failed" : runningTasks ? "running" : "completed"} aria-label={`Background tasks: ${runningTasks} running, ${taskCount} total${taskFailure ? ", needs attention" : ""}`} aria-expanded={tasksOpen} aria-controls="background-tasks" onPress={() => setTasksOpen((open) => !open)}>
               <Icon as={runningTasks ? LoaderCircle : taskFailure ? CircleAlert : CircleCheck} className={`icon${runningTasks ? " task-spinner" : ""}`} aria-hidden="true" />
             </Button>
           )}>
             <PopoverBackdrop className="task-backdrop" />
             <PopoverContent ref={setTasksContentRef} id="background-tasks" className="task-details" aria-label="Background tasks">
               <div className="progress-heading"><h2>Background tasks</h2><span className="progress-status">{runningTasks ? `${runningTasks} running` : taskCount ? "No tasks running" : "No background tasks"}</span></div>
-              {actionStatus && !dismissedIds.has(actionStatus.id) && <ActionProgress job={actionStatus} onDismiss={dismissAction} announce={!(dialog && actionStatus.phase === "apply")} />}
+              {syncVisible && !dismissedIds.has(syncVisible.id) && <ActionProgress job={syncVisible} onDismiss={dismissSync} />}
               {state?.job && !dismissedIds.has(state.job.id) && <ActionProgress job={state.job} onDismiss={dismissEnrich} />}
               {importJob && !dismissedIds.has(importJob.id) && <ActionProgress job={importJob} onDismiss={dismissImportJob} onReview={() => { setTasksOpen(false); openImportReview(); }} />}
               {downloadMessage && <section className={`download-status${downloadFailed ? " failed" : ""}`} role="status" aria-atomic="true"><span>{downloadMessage}</span>{!downloadingAsset && <Button className="icon-button" aria-label="Dismiss download status" onPress={() => { setDownloadMessage(""); setDownloadFailed(false); }}><Icon as={X} className="icon" aria-hidden="true" /></Button>}</section>}
@@ -1462,188 +1355,19 @@ function App() {
           <Button type="button" className="icon-button theme-toggle" title={`Theme: ${theme}. Switch to ${theme === "system" ? "light" : theme === "light" ? "dark" : "system"}`} aria-label={`Theme: ${theme}. Switch to ${theme === "system" ? "light" : theme === "light" ? "dark" : "system"}`} onPress={() => setTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")}>
             <Icon as={theme === "system" ? Monitor : theme === "light" ? Sun : Moon} className="icon" aria-hidden="true" />
           </Button>
-          <Popover
-            isOpen={actionsOpen}
-            onClose={() => setActionsOpen(false)}
-            finalFocusRef={actionTriggerRef}
-            placement="bottom right"
-            offset={10}
-            trigger={(triggerProps) => (
-              <Button
-                type="button"
-                {...triggerProps}
-                ref={(node) => {
-                  actionTriggerRef.current = node;
-                  const ref = triggerProps.ref;
-                  if (typeof ref === "function") ref(node);
-                  else if (ref) ref.current = node;
-                }}
-                className="button quiet"
-                onPress={() => { setTasksOpen(false); setActionsOpen((open) => !open); }}
-              >
-                Library actions{" "}
-                <Icon
-                  as={ChevronDown}
-                  className="icon"
-                  aria-hidden="true"
-                  focusable={false}
-                />
-              </Button>
-            )}
+          <Button
+            type="button"
+            ref={syncTriggerRef}
+            className={`button ${syncReview ? "primary" : "quiet"} sync-button`}
+            data-state={syncReview ? "review" : syncRunning || syncStarting ? "running" : syncJob?.status === "failed" ? "failed" : "idle"}
+            onPress={() => { if (syncReview) { setSyncReviewError(""); setSyncReviewOpen(true); } else void startSync(); }}
+            isDisabled={!syncReview && (libraryActivity || loading || storageBusy)}
+            aria-label={syncReview ? `Review ${syncReview.count} changes` : syncRunning || syncStarting ? "Syncing library" : "Sync library"}
+            title="Update the index, match Store details, and plan file changes"
           >
-            <PopoverContent
-              id="library-actions"
-              className="library-actions"
-              aria-label="Library actions"
-            >
-              <div className="summary-strip">
-                <div>
-                  <span className="summary-label">INDEXED</span>
-                  <strong>{assets.length}</strong>
-                </div>
-                <div>
-                  <span className="summary-label">PENDING</span>
-                  <strong className={pendingCount ? "accent-text" : ""}>
-                    {pendingCount}
-                  </strong>
-                </div>
-                <div>
-                  <span className="summary-label">FLAGGED</span>
-                  <strong>{flaggedCount}</strong>
-                </div>
-              </div>
-              <div
-                className={`actions-intro connection ${error ? "offline" : ""}`}
-              >
-                <span className="connection-dot" />
-                {error
-                  ? "Needs attention"
-                  : loading
-                    ? "Starting Python"
-                    : "Connected"}
-              </div>
-              <p className="actions-intro">
-                Choose an action for your library.
-              </p>
-              <Button
-                type="button"
-                className="library-action"
-                onPress={() => {
-                  setActionsOpen(false);
-                  void runAction("resync");
-                }}
-                isDisabled={Boolean(busy) || loading || importActive}
-              >
-                <Icon
-                  as={RefreshCw}
-                  className="icon"
-                  aria-hidden="true"
-                  focusable={false}
-                />
-                <span>
-                  <strong>
-                    {busy === "resync" ? "Syncing…" : "Resync index"}
-                  </strong>
-                  <span>
-                    Scan local files and review index changes before applying.
-                    Never deletes files from disk.
-                  </span>
-                </span>
-              </Button>
-              <Button
-                type="button"
-                className="library-action"
-                onPress={() => {
-                  setActionsOpen(false);
-                  void startEnrich();
-                }}
-                isDisabled={Boolean(busy) || loading || importActive || Boolean(jobRunning)}
-              >
-                <Icon
-                  as={Sparkles}
-                  className="icon"
-                  aria-hidden="true"
-                  focusable={false}
-                />
-                <span>
-                  <strong>{jobRunning ? "Enrich · running" : "Enrich"}</strong>
-                  <span>
-                    Look up pending assets online to add Store details,
-                    categories, thumbnails, and ratings. Does not change package
-                    files.
-                  </span>
-                </span>
-              </Button>
-              <Button
-                type="button"
-                className="library-action"
-                onPress={() => {
-                  setActionsOpen(false);
-                  void runAction("organize");
-                }}
-                isDisabled={Boolean(busy) || loading || importActive}
-              >
-                <Icon
-                  as={Folder}
-                  className="icon"
-                  aria-hidden="true"
-                  focusable={false}
-                />
-                <span>
-                  <strong>
-                    {busy === "organize" ? "Planning…" : "Organize"}
-                  </strong>
-                  <span>
-                    Preview moving archives into Store-category folders. Moves
-                    files only after confirmation; never renames or unpacks
-                    them.
-                  </span>
-                </span>
-              </Button>
-              <Button
-                type="button"
-                className="library-action"
-                onPress={() => {
-                  setActionsOpen(false);
-                  void runAction("cleanup");
-                }}
-                isDisabled={Boolean(busy) || loading || importActive}
-              >
-                <Icon
-                  as={Folder}
-                  className="icon"
-                  aria-hidden="true"
-                  focusable={false}
-                />
-                <span>
-                  <strong>
-                    {busy === "cleanup" ? "Planning…" : "Clean up old versions"}
-                  </strong>
-                  <span>
-                    Review old archives to delete and the versions to keep.
-                    Deletes files only after confirmation.
-                  </span>
-                </span>
-              </Button>
-              {jobRunning && (
-                <Button
-                  type="button"
-                  className="button quiet danger-text"
-                  onPress={() => {
-                    setActionsOpen(false);
-                    void cancelEnrich();
-                  }}
-                  isDisabled={enrichCancelling}
-                >
-                  {enrichCancelling ? "Cancelling…" : "Cancel enrich"}
-                </Button>
-              )}
-              <p className="actions-hint">
-                Suggested order: Resync index → Enrich → Organize → Clean up old
-                versions (optional)
-              </p>
-            </PopoverContent>
-          </Popover>
+            <Icon as={syncRunning || syncStarting ? LoaderCircle : RefreshCw} className={`icon${syncRunning || syncStarting ? " task-spinner" : ""}`} aria-hidden="true" focusable={false} />
+            {syncReview ? `Review ${syncReview.count} change${syncReview.count === 1 ? "" : "s"}` : syncRunning || syncStarting ? "Syncing…" : syncJob?.status === "failed" ? "Sync failed · Retry" : "Sync"}
+          </Button>
         </div>
       </header>
       {error && (
@@ -1748,7 +1472,7 @@ function App() {
               />
             </div>
           </div>
-          <FavoritePackages disabled={Boolean(downloadingAsset) || storageBusy || loading || Boolean(busy) || tagBusy || Boolean(state?.job && ["queued", "running"].includes(state.job.status)) || Boolean(actionStatus && ["queued", "running"].includes(actionStatus.status)) || Boolean(importJob && ["queued", "running"].includes(importJob.status))} job={packageJob} onInstall={startSavedPackageInstall} storageEpoch={storageEpoch} hidden={quick !== "favorites"} />
+          <FavoritePackages disabled={Boolean(downloadingAsset) || storageBusy || loading || tagBusy || libraryActivity || Boolean(importJob && ["queued", "running"].includes(importJob.status))} job={packageJob} onInstall={startSavedPackageInstall} storageEpoch={storageEpoch} hidden={quick !== "favorites"} />
           {quick === "favorites" && <h2 className="starred-assets-heading">Starred assets</h2>}
           <div className="browser-actions">
           {(query || category !== "All assets" || quick !== "all" || author || untagged || selectedTags.length > 0) && <div className="filter-context" aria-label="Active filters">
@@ -1781,7 +1505,7 @@ function App() {
               <Icon as={Folder} className="icon empty-mark" aria-hidden="true" focusable={false} />
               <h3>Your library is empty</h3>
               <p>No Unity packages or archives have been indexed in this folder yet.</p>
-              <Button type="button" className="button quiet" onPress={() => void runAction("resync")} isDisabled={storageBusy || libraryActivity}>Scan library</Button>
+              <Button type="button" className="button quiet" onPress={() => void startSync()} isDisabled={storageBusy || libraryActivity}>Sync</Button>
             </div>
           ) : filtered.length ? (
             <div className={view === "grid" ? "asset-grid" : "asset-list"}>
@@ -1898,14 +1622,15 @@ function App() {
           </AlertDialogBody>
         </AlertDialogContent>
       </AlertDialog>}
-      {dialog && (
-        <ActionDialog
-          dialog={dialog}
-          busy={Boolean(busy)}
-          progress={actionStatus?.phase === "apply" ? actionStatus : null}
-          finalFocusRef={actionTriggerRef}
-          onClose={() => setDialog(null)}
-          onConfirm={() => void confirmDialog()}
+      {syncReviewOpen && syncReview && (
+        <SyncReviewDialog
+          review={syncReview}
+          applying={syncApplying}
+          error={syncReviewError}
+          finalFocusRef={syncTriggerRef}
+          onConfirm={() => void applySyncReview()}
+          onDiscard={() => void discardSyncReview()}
+          onClose={() => setSyncReviewOpen(false)}
         />
       )}
       {importOpen && (
@@ -2173,291 +1898,6 @@ function StarButton({
     >
       <Icon as={Star} className="icon" aria-hidden="true" focusable={false} />
     </Button>
-  );
-}
-
-function ActionDialog({
-  dialog,
-  busy,
-  progress,
-  finalFocusRef,
-  onClose,
-  onConfirm,
-}: {
-  dialog: NonNullable<DialogState>;
-  busy: boolean;
-  progress: ActionJob | null;
-  finalFocusRef: RefObject<HTMLButtonElement | null>;
-  onClose: () => void;
-  onConfirm: () => void;
-}) {
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const setContentRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      contentRef.current = node;
-      // OverlayProvider removes portals after the owner unmounts. Restore once
-      // the content actually detaches, after its focus scope has been removed.
-      if (!node)
-        queueMicrotask(() => {
-          if (!contentRef.current) finalFocusRef.current?.focus();
-        });
-    },
-    [finalFocusRef],
-  );
-  const preview = dialog.result.preview || {};
-  const resync = dialog.mode === "resync";
-  const rows =
-    dialog.mode === "cleanup" ? preview.removals || [] : preview.moves || [];
-  const totals = preview.totals || {};
-  const groups = [
-    {
-      label: "Add to index",
-      rows: preview.additions || [],
-      tone: "add",
-      hint: "Files found in the vault that are not indexed yet.",
-    },
-    {
-      label: "Remove from index",
-      rows: preview.removals || [],
-      tone: "remove",
-      hint: "Files no longer found in the vault. Does not delete files from disk.",
-    },
-    {
-      label: "Update size in index",
-      rows: preview.resized || [],
-      tone: "resize",
-      hint: "Existing paths whose file size changed.",
-    },
-  ];
-  const applyComplete = progress?.status === "completed";
-  const applyDrift = progress?.status === "failed" && progress.error_code === "plan_changed";
-  const applyApplied = applyComplete || progress?.result?.applied === true;
-  const applying = Boolean(progress && ["queued", "running"].includes(progress.status));
-  return (
-    <AlertDialog
-      isOpen
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-      finalFocusRef={finalFocusRef}
-      initialFocusRef={cancelRef}
-      isKeyboardDismissable={!busy}
-      closeOnOverlayClick={false}
-      className="dialog-overlay"
-    >
-      <AlertDialogBackdrop className="dialog-backdrop" />
-      <AlertDialogContent
-        ref={setContentRef}
-        className="action-dialog"
-        aria-labelledby="action-title"
-        aria-describedby="action-description"
-      >
-        <AlertDialogHeader className="dialog-top">
-          <div>
-            <div className="eyebrow">CONFIRMATION REQUIRED</div>
-            <h2 id="action-title">{dialog.title}</h2>
-          </div>
-          <Button
-            type="button"
-            className="icon-button"
-            onPress={onClose}
-            isDisabled={busy}
-            aria-label="Close dialog"
-          >
-            <Icon
-              as={X}
-              className="icon"
-              aria-hidden="true"
-              focusable={false}
-            />
-          </Button>
-        </AlertDialogHeader>
-        <AlertDialogBody>
-          {progress && <ActionProgress job={progress} announce />}
-          <p id="action-description" className="dialog-lead">
-            {applying
-              ? "Applying the approved changes now. This dialog will stay open until the operation and index refresh finish."
-              : resync
-                ? "Review the vault-relative paths below before updating the index. No files will be deleted from disk."
-                : dialog.mode === "cleanup"
-                  ? "Compare the archives to delete with the versions kept on disk. Only files marked Delete will be removed, and only after you confirm."
-                  : "Review these moves before anything changes on disk."}
-          </p>
-          {resync ? (
-            <>
-              <div className="dialog-stats">
-                {groups.map((group) => (
-                  <div key={group.tone}>
-                    <strong
-                      className={
-                        group.tone === "add"
-                          ? "added-text"
-                          : group.tone === "remove"
-                            ? "danger-text"
-                            : ""
-                      }
-                    >
-                      {group.rows.length}
-                    </strong>
-                    <span>{group.label}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="resync-groups">
-                {groups
-                  .filter(
-                    (group) => group.tone !== "resize" || group.rows.length > 0,
-                  )
-                  .map((group) => (
-                    <section
-                      className="change-group"
-                      key={group.tone}
-                      aria-label={group.label}
-                    >
-                      <h3>
-                        {group.label} <span>{group.rows.length}</span>
-                      </h3>
-                      <p>{group.hint}</p>
-                      <ul className="change-list">
-                        {group.rows.map((row) => (
-                          <li key={row.path}>
-                            <span>{row.path}</span>
-                            <small>
-                              {group.tone === "resize"
-                                ? formatBytes(row.previous_size_bytes ?? 0) +
-                                  " → "
-                                : ""}
-                              {formatBytes(row.size_bytes ?? 0)}
-                            </small>
-                          </li>
-                        ))}
-                      </ul>
-                      {!group.rows.length && (
-                        <p className="change-empty">
-                          No files to {group.tone === "add" ? "add" : "remove"}.
-                        </p>
-                      )}
-                    </section>
-                  ))}
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="dialog-stats">
-                <div>
-                  <strong>{totals.files ?? totals.moves ?? rows.length}</strong>
-                  <span>
-                    {dialog.mode === "cleanup"
-                      ? "files to delete"
-                      : "moves planned"}
-                  </span>
-                </div>
-                <div>
-                  <strong>
-                    {formatBytes(totals.bytes ?? totals.move_bytes ?? 0)}
-                  </strong>
-                  <span>storage</span>
-                </div>
-              </div>
-              {dialog.mode === "cleanup" ? (
-                <div className="resync-groups">
-                  {(preview.families || [])
-                    .filter((family) => family.removals.length > 0)
-                    .map((family) => (
-                      <section className="change-group" key={family.asset_key}>
-                        <h3>{family.asset_key}</h3>
-                        <p>
-                          {family.reason === "superseded"
-                            ? "Older version replaced by the retained archive."
-                            : family.reason}
-                        </p>
-                        <ul className="change-list">
-                          {family.survivor && (
-                            <li key={`keep-${family.asset_key}`}>
-                              <span>
-                                <strong className="added-text">Keep</strong> ·{" "}
-                                {family.survivor.path}
-                              </span>
-                              <small>
-                                {formatBytes(family.survivor.size_bytes ?? 0)}
-                              </small>
-                            </li>
-                          )}
-                          {family.removals.map((row) => (
-                            <li key={row.path}>
-                              <span>
-                                <strong className="danger-text">Delete</strong>{" "}
-                                · {row.path}
-                              </span>
-                              <small>{formatBytes(row.size_bytes ?? 0)}</small>
-                            </li>
-                          ))}
-                        </ul>
-                      </section>
-                    ))}
-                  {!rows.length && (
-                    <p className="change-empty">No old versions to delete.</p>
-                  )}
-                </div>
-              ) : (
-                <div className="plan-list">
-                  {rows.map((row, index) => (
-                    <div key={row.src || index}>
-                      <span>{row.src}</span>
-                      <span className="plan-arrow">
-                        <Icon
-                          as={ArrowRight}
-                          className="icon"
-                          aria-hidden="true"
-                          focusable={false}
-                        />
-                      </span>
-                      <span>{row.dst}</span>
-                    </div>
-                  ))}
-                  {!rows.length && (
-                    <div className="plan-more">
-                      No file changes are planned.
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </AlertDialogBody>
-        <AlertDialogFooter className="dialog-foot">
-          <Button
-            type="button"
-            ref={cancelRef}
-            className="button quiet"
-            onPress={onClose}
-            isDisabled={busy}
-            autoFocus
-          >
-            {applyApplied ? "Done" : "Cancel"}
-          </Button>
-          <Button
-            type="button"
-            className="button primary"
-            onPress={onConfirm}
-            isDisabled={busy || applyApplied || (!dialog.result.plan_hash && !applyDrift) || (!resync && !rows.length)}
-          >
-            {busy
-              ? "Applying…"
-              : applyApplied
-                ? "Applied"
-                : applyDrift
-                  ? "Confirm updated plan"
-                  : resync
-                    ? "Apply resync"
-                    : dialog.mode === "cleanup"
-                      ? "Delete files from disk"
-                      : "Confirm changes"}
-          </Button>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
   );
 }
 
