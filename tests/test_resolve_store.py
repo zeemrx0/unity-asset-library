@@ -152,15 +152,46 @@ class TestConjunctiveGate(unittest.TestCase):
         # The gate rejects the higher-scoring wrong pair regardless of that ordering.
         self.assertFalse(rs.verify_identity("Epic Toon VFX 2", "Epic Toon VFX 3")[0])
 
-    def test_reordered_synty_rename_is_a_known_safe_false_negative(self):
-        """The gate rejects this genuine same-product pair because the store reordered
-        the words. That is the intended trade: a false negative costs one review-queue
-        entry and an override, while a false positive silently writes wrong metadata.
-        """
+    def test_reordered_synty_rename_is_accepted(self):
+        """Word order and word splits are not identity. The symmetric token check
+        accepts this genuine rename while still rejecting every sibling pair above."""
         ok, reason, _ = rs.verify_identity("POLYGON NatureBiomes MeadowForest",
                                            "POLYGON Meadow Forest - Nature Biomes")
-        self.assertFalse(ok)
-        self.assertIn("extra token", reason)
+        self.assertTrue(ok, reason)
+
+    def test_store_subset_of_local_title_rejected(self):
+        """The old gate checked only store-side extras, so these passed."""
+        for local, store in [
+            ("GPU Instancer Pro", "GPU Instancer"),
+            ("GPU Instancer - Crowd Animations", "GPU Instancer"),
+            ("Toon RTS Units - Elves", "Toon RTS Units"),
+            ("Volumetric Lights 2 HDRP", "Volumetric Lights 2"),
+            ("POLYGON Western Frontier - Low Poly 3D Art by Synty",
+             "POLYGON - Western Pack - Art by Synty"),
+            ("Amplify Shader Editor", "Amplify Shader Pack"),
+        ]:
+            with self.subTest(local=local):
+                ok, reason, _ = rs.verify_identity(local, store)
+                self.assertFalse(ok, f"{local} -> {store} wrongly accepted ({reason})")
+
+    def test_filename_noise_accepted(self):
+        for local, store, publisher in [
+            ("Cartoon FX 2 Remaster [R 1.2.4]", "Cartoon FX 2 Remaster", None),
+            ("Ancient Egypt Pack - Synty POLYGON - Stylized Low Poly Assets",
+             "POLYGON - Ancient Egypt Pack - Art by Synty", "Synty Studios"),
+            ("Battle Sound Library - Magic Melee - Fantasy RPG",
+             "Battle Sound Library - Magic & Melee - Human Made Audio - Fantasy RPG", None),
+            ("27 NPC Characters Medieval Pack", "27 NPC Characters Medieval (Pack)", None),
+            ("Melee 2 Game Creator 2 by Catsoft Works", "Melee 2 | Game Creator 2",
+             "Catsoft Works"),
+        ]:
+            with self.subTest(local=local):
+                ok, reason, _ = rs.verify_identity(local, store, publisher=publisher)
+                self.assertTrue(ok, f"{local} -> {store}: {reason}")
+
+    def test_publisher_words_need_the_publisher(self):
+        self.assertFalse(rs.verify_identity("Melee 2 Game Creator 2 by Catsoft Works",
+                                            "Melee 2 | Game Creator 2")[0])
 
 
 class TestLegacyLookup(unittest.TestCase):
@@ -1142,6 +1173,59 @@ class TestPackageHeaderResolution(TestPendingResolveScope):
         out = rs.merge(data, cache, {})
         methods = [a["resolution"]["method"] for a in out["assets"]]
         self.assertEqual(methods, ["package-header", "saved-match", "web-search"])
+
+
+class TestCandidateSelection(unittest.TestCase):
+    """All candidates are scored; close rivals for different products abstain."""
+
+    def _verify(self, title, names):
+        from unittest import mock
+        legacy = {str(i): {"id": str(i), "name": n, "publisher": "P"} for i, n in names.items()}
+        with mock.patch.object(rs, "legacy_lookup", side_effect=lambda pid, session=None: legacy.get(pid)):
+            return rs.verify_candidates({"name": title}, list(legacy))
+
+    def test_best_of_several_passing_candidates(self):
+        rec = self._verify("Toon RTS Units - Elves", {1: "Toon RTS Units", 2: "Toon RTS Units - Elves"})
+        self.assertEqual((rec["status"], rec["id"]), ("resolved", "2"))
+        self.assertNotIn("store_name", rec)
+
+    def test_duplicate_listing_is_not_a_rival(self):
+        rec = self._verify("Sci-Fi Scenes", {1: "Sci-Fi Scenes", 2: "Sci-Fi Scenes"})
+        self.assertEqual((rec["status"], rec["id"]), ("resolved", "1"))
+
+    def test_two_different_products_passing_equally_abstain(self):
+        rec = self._verify("POLYGON NatureBiomes MeadowForest",
+                           {1: "POLYGON Meadow Forest - Nature Biomes",
+                            2: "POLYGON - Nature Biomes Meadow Forest Pack"})
+        self.assertEqual(rec["status"], "unverified")
+        self.assertEqual(rec["reason"], "ambiguous")
+
+    def test_search_adds_cleaned_core_query(self):
+        session = MultiSession({}) if False else None
+        sent = []
+
+        class Recorder:
+            def get(self, url, params=None, **kw):
+                sent.append(params["q"])
+                return FakeResponse("<html></html>")
+
+        pool = rs.SearchPool(transports=(("t", "https://example.invalid/", {}),), session=Recorder())
+        pool.search("Cartoon FX 2 Remaster [R 1.2.4]")
+        self.assertEqual(sent[-1], "site:assetstore.unity.com cartoon fx 2 remaster")
+        self.assertEqual(len(sent), 3)
+        del session
+
+    def test_no_extra_query_when_title_is_already_clean(self):
+        sent = []
+
+        class Recorder:
+            def get(self, url, params=None, **kw):
+                sent.append(params["q"])
+                return FakeResponse("<html></html>")
+
+        rs.SearchPool(transports=(("t", "https://example.invalid/", {}),),
+                      session=Recorder()).search("Toon RTS Units")
+        self.assertEqual(len(sent), 2)
 
 
 class TestStructuredProgress(unittest.TestCase):

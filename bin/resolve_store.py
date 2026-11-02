@@ -117,10 +117,14 @@ class SearchPool:
         """
         quoted = f'site:{STORE_HOST} "{title}"'
         plain = f"site:{STORE_HOST} {title}"
+        queries = [quoted, plain]
+        core = " ".join(t for t in _tokens(title) if t not in MARKETING_TOKENS)
+        if core and core != normalize(title):
+            queries.append(f"site:{STORE_HOST} {core}")
         last_block = None
         last_request_error = None
         saw_success = False
-        for query in (quoted, plain):
+        for query in queries:
             now = time.time()
             available = self._available(now)
             if not available:
@@ -226,25 +230,82 @@ def similarity(local, store):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
+# Version and editor noise that filenames carry but identity does not.
+BRACKET_VERSION_RE = re.compile(r"[\[(][^\])]*\d\.\d[^\])]*[\])]")
+EDITOR_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\.\d+\b")
+DOTTED_VERSION_RE = re.compile(r"\bv?\d+(?:\.\d+){1,3}[a-z]?\b", re.I)
+PIPELINE_RE = re.compile(r"(HDRP|URP|LWRP|Built-?in)", re.I)
+PHRASE_NOISE_RE = re.compile(r"\bhuman[\s-]*made\s+audio\b", re.I)
+
+# Words that describe a listing without naming the product.
+MARKETING_TOKENS = frozenset({
+    "pack", "packs", "asset", "assets", "low", "poly", "lowpoly", "stylized", "3d",
+    "art", "by", "the", "and", "of", "for", "a", "an", "unity", "model", "models",
+    "inspector", "complete", "solution", "optimization"})
+
+# Edition words. A difference in any of them means a different product, so they are
+# never explained away (GPU Instancer vs GPU Instancer Pro, Volumetric Lights 2 vs
+# Volumetric Lights 2 HDRP).
+SIBLING_TOKENS = frozenset({
+    "pro", "lite", "free", "plus", "premium", "deluxe", "ultimate", "hd", "mobile",
+    "remaster", "remastered", "classic", "legacy", "urp", "hdrp", "lwrp", "builtin",
+    "mega", "megapack"})
+
+
+def clean_title(text):
+    """Remove version, editor-year and audio-tagline noise before comparison."""
+    text = BRACKET_VERSION_RE.sub(" ", text or "")
+    text = EDITOR_YEAR_RE.sub(" ", text)
+    text = DOTTED_VERSION_RE.sub(" ", text)
+    text = PHRASE_NOISE_RE.sub(" ", text)
+    return PIPELINE_RE.sub(lambda m: " " + m.group(1).replace("-", "") + " ", text)
+
+
 def numeric_tokens(text):
-    return set(re.findall(r"\d+", normalize(text)))
+    return set(re.findall(r"\d+", normalize(clean_title(text))))
+
+
+def _tokens(text):
+    return normalize(clean_title(text)).split()
+
+
+def _unexplained(tokens, other):
+    """Tokens with no counterpart in other, allowing word-split differences either
+    way ("MeadowForest" vs "Meadow Forest")."""
+    other_set = set(other)
+    joins = {other[i] + other[i + 1] for i in range(len(other) - 1)}
+    out = []
+    for i, tok in enumerate(tokens):
+        if tok in other_set or tok in joins:
+            continue
+        if i + 1 < len(tokens) and tok + tokens[i + 1] in other_set:
+            continue
+        if i > 0 and tokens[i - 1] + tok in other_set:
+            continue
+        out.append(tok)
+    return out
 
 
 def despace(text):
     return normalize(text).replace(" ", "")
 
 
-def verify_identity(local_title, store_name, discriminators=()):
-    """Conjunctive gate. Returns (ok: bool, reason: str, score: float).
+def verify_identity(local_title, store_name, discriminators=(), publisher=None):
+    """Symmetric identity gate. Returns (ok: bool, reason: str, score: float).
 
-    Deliberately NOT a similarity threshold. All three conditions must hold:
-      1. similarity clears a low floor (catches total mismatch)
-      2. numeric tokens agree exactly  (Epic Toon VFX 2 != 3, Pure Nature 2 sibs)
-      3. no store token missing from local beyond a whitelisted marketing tail
-         (GPU Instancer != GPU Instancer Pro, Character Auras != Character Auras 3)
+    Deliberately NOT a similarity threshold; the score only ranks candidates. All
+    conditions must hold after version/editor noise is removed from both names:
+      1. numeric tokens agree exactly   (Epic Toon VFX 2 != 3)
+      2. no edition word on one side only (GPU Instancer != GPU Instancer Pro,
+         Volumetric Lights 2 != Volumetric Lights 2 HDRP)
+      3. every non-marketing word on EACH side has a counterpart on the other.
+         The old gate checked only store-side extras, so a store name that was a
+         subset of the local title ("GPU Instancer" for "GPU Instancer Pro") passed.
+    Word order and word splits do not matter (Synty renames reorder words). The
+    store publisher's own words may appear in a local filename ("by Catsoft Works").
     """
     store_name = STORE_VERSION_TAIL_RE.sub("", store_name or "")
-    score = similarity(local_title, store_name)
+    score = similarity(clean_title(local_title), clean_title(store_name))
 
     # Word-boundary differences alone must not reject: "ModernCity" vs "Modern City
     # Pack" is the same product. Despacing cannot merge distinct siblings, because it
@@ -252,19 +313,29 @@ def verify_identity(local_title, store_name, discriminators=()):
     if despace(local_title) and despace(local_title) == despace(store_name):
         return True, "ok (despaced match)", max(score, SIMILARITY_FLOOR)
 
-    if score < SIMILARITY_FLOOR:
-        return False, f"similarity {score:.3f} below floor {SIMILARITY_FLOOR}", score
-
+    local_tokens, store_tokens = _tokens(local_title), _tokens(store_name)
     if numeric_tokens(local_title) != numeric_tokens(store_name):
         return False, "numeric-token mismatch", score
 
-    local_words = set(normalize(local_title).split())
-    store_words = set(normalize(store_name).split())
-    extra = store_words - local_words
-    if extra:
-        return False, f"store name has extra token(s) {sorted(extra)}", score
+    editions = (set(local_tokens) ^ set(store_tokens)) & SIBLING_TOKENS
+    if editions:
+        return False, f"edition token(s) on one side only {sorted(editions)}", score
 
-    return True, "ok", score
+    publisher_words = set(normalize(publisher or "").split()) - set(store_tokens)
+    local_core = [t for t in local_tokens
+                  if t not in MARKETING_TOKENS and t not in publisher_words]
+    store_core = [t for t in store_tokens if t not in MARKETING_TOKENS]
+    if not local_core or not store_core:
+        return False, "no identifying words after cleaning", score
+
+    extra_store = _unexplained(store_core, local_core)
+    if extra_store:
+        return False, f"store name has extra token(s) {sorted(extra_store)}", score
+    extra_local = _unexplained(local_core, store_core)
+    if extra_local:
+        return False, f"local name has extra token(s) {sorted(extra_local)}", score
+
+    return True, "ok", max(score, SIMILARITY_FLOOR)
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +482,7 @@ def parse_ld_json(html):
         "store": offers.get("url"),
         "price": offers.get("price"),
         "category_levels": category_levels,
-        "category_path": "/".join(category_levels) if category_levels else None,
+        "category_path": "/".join(str(c) for c in category_levels) if category_levels else None,
     }
     if rating.get("ratingValue"):
         out["rating"] = float(rating["ratingValue"])
@@ -556,7 +627,7 @@ def resolve_header(asset, package_id, header, session=None):
             return None
     header_pub = (header or {}).get("publisher")
     store_pub = (legacy or {}).get("publisher") or (detail or {}).get("author")
-    if header_pub and store_pub and header_pub.casefold().strip() != unescape(store_pub).casefold().strip():
+    if header_pub and store_pub and header_pub.casefold().strip() != str(unescape(store_pub)).casefold().strip():
         return None
     rec = {"status": "resolved", "title": asset["name"], "id": package_id,
            "legacy": legacy or {}, "score": None, "transport": "package-header",
@@ -605,7 +676,7 @@ def verify_candidates(asset, ids, session=None, sleep=None):
     """Run the conjunctive identity gate over candidate ids. Transport-agnostic:
     used by both the search path and externally-supplied ids."""
     title = asset["name"]
-    attempts = []
+    attempts, passed = [], []
     for package_id in ids[:5]:
         legacy = legacy_lookup(package_id, session=session)
         if sleep:
@@ -635,8 +706,11 @@ def verify_candidates(asset, ids, session=None, sleep=None):
                               + ((prefetched or {}).get("_rejected") or "detail unavailable")})
                 continue
 
+        publisher = ((legacy or {}).get("publisher")
+                     or (prefetched or {}).get("author"))
         ok, reason, score = verify_identity(title, store_name,
-                                            asset.get("discriminators", ()))
+                                            asset.get("discriminators", ()),
+                                            publisher=publisher)
         if not ok:
             attempts.append({"id": package_id, "store_name": store_name,
                              "reason": reason, "score": round(score, 3),
@@ -644,10 +718,29 @@ def verify_candidates(asset, ids, session=None, sleep=None):
             continue
         rec = {"status": "resolved", "title": title, "id": package_id,
                "legacy": legacy or {}, "score": round(score, 3),
-               "verified_via": source, "candidates_rejected": attempts}
+               "verified_via": source, "store_name": store_name}
         if prefetched:
             rec["detail"] = prefetched
-        return rec
+        passed.append(rec)
+
+    # Two DIFFERENT products that both pass the identity gate is ambiguity, not a
+    # match: they differ only in word order, which similarity cannot judge. Abstain.
+    # Duplicate listings of one name are not rivals.
+    passed.sort(key=lambda r: r["score"], reverse=True)
+    if passed:
+        best = passed[0]
+        rivals = [r for r in passed[1:]
+                  if normalize(r["store_name"]) != normalize(best["store_name"])]
+        if rivals:
+            return {"status": "unverified", "title": title, "reason": "ambiguous",
+                    "candidates_rejected": attempts + [
+                        {"id": r["id"], "store_name": r["store_name"],
+                         "reason": "ambiguous", "score": r["score"]}
+                        for r in [best] + rivals]}
+        best = dict(best)
+        best.pop("store_name", None)
+        best["candidates_rejected"] = attempts
+        return best
     return {"status": "unverified", "title": title, "candidates_rejected": attempts}
 
 
@@ -691,32 +784,9 @@ def resolve_asset(asset, pool, session=None, sleep=None):
     ids, transport = pool.search(title)
     if not ids:
         return {"status": "no-result", "title": title, "transport": transport}
-
-    attempts = []
-    for package_id in ids[:5]:
-        legacy = legacy_lookup(package_id, session=session)
-        if sleep:
-            sleep()
-        if not legacy:
-            attempts.append({"id": package_id, "reason": "legacy lookup failed"})
-            continue
-        ok, reason, score = verify_identity(title, legacy.get("name", ""),
-                                            asset.get("discriminators", ()))
-        if not ok:
-            attempts.append({"id": package_id, "store_name": legacy.get("name"),
-                             "reason": reason, "score": round(score, 3)})
-            continue
-        return {
-            "status": "resolved",
-            "title": title,
-            "id": package_id,
-            "legacy": legacy,
-            "score": round(score, 3),
-            "transport": transport,
-            "candidates_rejected": attempts,
-        }
-    return {"status": "unverified", "title": title, "transport": transport,
-            "candidates_rejected": attempts}
+    rec = verify_candidates(asset, ids, session=session, sleep=sleep)
+    rec["transport"] = transport
+    return rec
 
 
 class Pacer:
@@ -829,7 +899,7 @@ def merge(data, cache, overrides):
         asset["author"] = unescape(detail.get("author") or legacy.get("publisher"))
         if detail.get("category_path"):
             levels = unescape(detail["category_levels"])
-            asset["category"] = {"path": "/".join(levels),
+            asset["category"] = {"path": "/".join(str(level) for level in levels),
                                  "levels": levels,
                                  "source": "store"}
         if detail.get("store"):
@@ -953,10 +1023,9 @@ def main(argv=None, state_lock_held=False):
     return _main_unlocked(argv)
 def _main_unlocked(argv=None):
     # This run takes hours and is normally watched through a pipe or a log file.
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except AttributeError:
-        pass
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from index_assets import state_dir
     ap = argparse.ArgumentParser(description=__doc__)
@@ -985,6 +1054,7 @@ def _main_unlocked(argv=None):
     data = _read_index(index_dir, lock_already_held=True) if args.command in ("enrich", "export-titles") else None
 
     if args.command == "export-titles":
+        assert data is not None
         cache = load_cache(cache_path) if args.pending else None
         pending_keys = load_pending_keys(index_dir, data, cache, lock_already_held=True) if args.pending else None
         rows = filter_worklist(data["assets"], pending_keys)
@@ -1048,6 +1118,7 @@ def _main_unlocked(argv=None):
             return 0
 
     if args.command == "enrich":
+        assert data is not None
         import user_tags
         user_tags.migrate(index_dir, lock_already_held=True)
         cache = load_cache(cache_path)
