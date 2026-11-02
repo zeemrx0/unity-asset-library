@@ -536,6 +536,39 @@ def resolve_known(asset, package_id, session=None):
             "verified_via": "matches.json", "candidates_rejected": []}
 
 
+def resolve_header(asset, package_id, header, session=None):
+    """Resolve by the store id embedded in a local package header.
+
+    The id must still exist on the store (legacy API or the detail page's own id
+    check). When both sides name a publisher and they disagree, the header is not
+    trusted and web search decides. Returns None when unconfirmed; raises Blocked
+    like legacy_lookup."""
+    legacy = legacy_lookup(package_id, session=session)
+    detail = None
+    if not (legacy and legacy.get("name")):
+        legacy = None
+        try:
+            detail = fetch_detail(package_id, session=session,
+                                  url_hint=f"https://{STORE_HOST}/packages/slug/{package_id}")
+        except requests.RequestException:
+            detail = None
+        if not detail or detail.get("_rejected") or not detail.get("name"):
+            return None
+    header_pub = (header or {}).get("publisher")
+    store_pub = (legacy or {}).get("publisher") or (detail or {}).get("author")
+    if header_pub and store_pub and header_pub.casefold().strip() != unescape(store_pub).casefold().strip():
+        return None
+    rec = {"status": "resolved", "title": asset["name"], "id": package_id,
+           "legacy": legacy or {}, "score": None, "transport": "package-header",
+           "verified_via": "package-header", "candidates_rejected": []}
+    if detail:
+        rec["detail"] = detail
+    return rec
+
+
+RESOLUTION_METHODS = {"package-header": "package-header", "matches.json": "saved-match"}
+
+
 # ---------------------------------------------------------------------------
 # resolution driver
 # ---------------------------------------------------------------------------
@@ -811,8 +844,8 @@ def merge(data, cache, overrides):
                 asset[field] = detail[field]
         if legacy.get("version"):
             asset["upstream_version"] = legacy["version"]
-        asset["resolution"] = {"method": "web-search", "id_verified": True,
-                               "score": rec.get("score")}
+        asset["resolution"] = {"method": RESOLUTION_METHODS.get(rec.get("verified_via"), "web-search"),
+                               "id_verified": True, "score": rec.get("score")}
         applied += 1
 
     warnings = []
@@ -936,6 +969,8 @@ def _main_unlocked(argv=None):
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--state-lock-held", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--state", default=None, help="library data directory override")
+    ap.add_argument("--root", default=None,
+                    help="resolve: library folder; enables store ids from package headers")
     ap.add_argument("--progress-json", action="store_true",
                     help="emit structured UL_PROGRESS events to stdout")
     ap.add_argument("--limit", type=int, default=30)
@@ -1066,6 +1101,13 @@ def _main_unlocked(argv=None):
             random.seed(20260730)
             todo = random.sample(todo, min(args.limit, len(todo)))
 
+        headers, header_conflicts = {}, {}
+        if args.root:
+            import package_header
+            headers, header_conflicts = package_header.store_ids_for(
+                todo, args.root, os.path.join(index_dir, "header-cache.json"))
+            print(f"header ids: {len(headers)}, conflicts: {len(header_conflicts)}")
+
         pacer = Pacer(base=args.base_delay)
         session = requests.Session()
         pool = SearchPool(session=session)
@@ -1092,9 +1134,12 @@ def _main_unlocked(argv=None):
                       resolved=stats["resolved"], failed=stats["failed"],
                       blocked=stats["blocked"], skipped=stats["skipped"])
             try:
+                rec = None
                 if known.get(key):
                     rec = resolve_known(asset, known[key], session=session)
-                else:
+                elif key in headers:
+                    rec = resolve_header(asset, headers[key]["id"], headers[key], session=session)
+                if rec is None:
                     rec = resolve_asset(asset, pool, session=session)
                 all_blocked_streak = 0
                 pacer.ok()

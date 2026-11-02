@@ -1081,6 +1081,69 @@ class TestPendingResolveScope(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(attempted, [])
 
+class TestPackageHeaderResolution(TestPendingResolveScope):
+    """A store id read from a local package header resolves without web search."""
+
+    def _vault_asset(self, key, header):
+        import tempfile
+        from unittest import mock
+        root = tempfile.mkdtemp(prefix="ual-vault-")
+        rel = key + ".unitypackage"
+        open(os.path.join(root, rel), "wb").close()
+        asset = dict(self._asset(key), versions=[{"file": rel}])
+        p = mock.patch("package_header.store_ids_for",
+                       return_value=({key: header} if header else {}, {}))
+        p.start()
+        self.addCleanup(p.stop)
+        return root, asset
+
+    def _legacy(self, publisher):
+        from unittest import mock
+        p = mock.patch.object(rs, "legacy_lookup", return_value={
+            "id": "177524", "name": "Stylized Clouds Pack", "publisher": publisher})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _cached(self, key):
+        with open(os.path.join(self.state, "cache.json"), encoding="utf-8") as fh:
+            return json.load(fh)["resolved"][key]
+
+    def test_header_id_skips_web_search(self):
+        self._legacy("Ember Glitch")
+        root, asset = self._vault_asset("a", {"id": "177524", "publisher": "Ember Glitch"})
+        code, attempted = self._run(["--root", root], [asset], cache={"resolved": {}})
+        self.assertEqual(code, 0)
+        self.assertEqual(attempted, [])
+        rec = self._cached("a")
+        self.assertEqual((rec["id"], rec["verified_via"]), ("177524", "package-header"))
+
+    def test_publisher_mismatch_falls_back_to_search(self):
+        self._legacy("Someone Else")
+        root, asset = self._vault_asset("a", {"id": "177524", "publisher": "Ember Glitch"})
+        code, attempted = self._run(["--root", root], [asset], cache={"resolved": {}})
+        self.assertEqual(code, 0)
+        self.assertEqual(attempted, ["a"])
+
+    def test_saved_match_wins_over_header(self):
+        from unittest import mock
+        self._legacy("Ember Glitch")
+        root, asset = self._vault_asset("a", {"id": "177524", "publisher": "Ember Glitch"})
+        with mock.patch.object(rs, "load_matches", return_value={"a": "999"}):
+            self._run(["--root", root], [asset], cache={"resolved": {}})
+        rec = self._cached("a")
+        self.assertEqual((rec["id"], rec["verified_via"]), ("999", "matches.json"))
+
+    def test_merge_records_provenance(self):
+        data = {"assets": [{"asset_key": k, "name": k} for k in ("h", "m", "w")]}
+        cache = {"resolved": {
+            "h": {"status": "resolved", "id": "1", "verified_via": "package-header"},
+            "m": {"status": "resolved", "id": "2", "verified_via": "matches.json"},
+            "w": {"status": "resolved", "id": "3"}}}
+        out = rs.merge(data, cache, {})
+        methods = [a["resolution"]["method"] for a in out["assets"]]
+        self.assertEqual(methods, ["package-header", "saved-match", "web-search"])
+
+
 class TestStructuredProgress(unittest.TestCase):
     def test_completed_resolve_reports_unmatched_outcomes(self):
         import contextlib

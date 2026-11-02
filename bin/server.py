@@ -868,7 +868,8 @@ class ViewerService:
     def _job_body(self, job):
         stages = (
             ("resolve", [sys.executable, "-u", self.resolve_py, "resolve", "--resume",
-                         "--pending", "--progress-json", "--state", self.state], False),
+                         "--pending", "--progress-json", "--state", self.state,
+                         "--root", self.root], False),
             ("enrich", [sys.executable, "-u", self.resolve_py, "enrich", "--state-lock-held",
                          "--progress-json", "--state", self.state], True),
             ("emit", [sys.executable, "-u", self.index_py, "emit", "--state-lock-held",
