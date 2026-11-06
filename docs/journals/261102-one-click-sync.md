@@ -6,9 +6,15 @@ Branch: `feat/one-click-sync`. Plan: `plans/261102-1520-one-click-sync/`.
 
 - One **Sync** button replaces the Library actions menu (Resync index, Enrich, Organize, Clean up old versions) and the empty-state Scan library button.
 - Sync runs one backend job: scan and update the index, match pending assets to the Asset Store, then plan old-version deletions and category-folder moves. Index and matching apply on their own. File deletions and moves wait in one "Review N changes" dialog and apply only after one confirmation.
-- Sync starts by itself 30 seconds after archive changes in the library folder, 5 seconds after the backend session starts, and on window focus at most every 10 minutes. Overlapping starts coalesce into one follow-up run.
+- Sync starts by itself 30 seconds after archive changes in the library folder, 5 seconds after the backend session starts, and on window focus at most every 10 minutes. Overlapping starts coalesce into one follow-up run. *Superseded on 2026-11-06: see "Update" below.*
 - Store matching order: saved match, then the Store id embedded in local `.unitypackage` headers (never read from cloud-only files), then web search.
 - The name gate is now symmetric: identifying words on each side must appear on the other. Edition words (Pro, HDRP, Mobile and similar) must match. Two different products that both pass make the result ambiguous, so nothing is written.
+
+## Update (2026-11-06): sync runs only when the user presses Sync
+
+- The same three moments (archive changes, backend session start, window focus) now run a read-only check through `POST /api/sync/check`. The check scans the library and compares it with the index, and it counts assets without Store details. It never writes the index or the library, and it skips while a sync or another operation runs.
+- `/api/state` returns the latest result as `sync_check`. When a sync is needed, a notice beside the Sync button lists the new, removed and resized archives and the assets without Store details, and the button shows an "available" state. The user starts sync manually. A finished sync clears the notice.
+- Assets that the last match already tried do not keep the notice open. Only a changed count of assets without Store details shows it again.
 
 ## Numbers
 

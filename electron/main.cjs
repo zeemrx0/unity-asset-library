@@ -926,9 +926,10 @@ function createWindow() {
   else window.loadFile(path.join(app.getAppPath(), "dist", "renderer", "index.html"));
 }
 
-// Auto-sync: watch the active library and ask the backend to sync after archive
-// changes, shortly after a backend session starts, and when the window regains
-// focus (at most every 10 minutes). The backend coalesces overlapping requests.
+// Sync check: sync never starts on its own. Watch the active library and ask the
+// backend for a read-only check after archive changes, shortly after a backend
+// session starts, and when the window regains focus (at most every 10 minutes).
+// The renderer shows the cached result as a notice; the user starts sync manually.
 const { createSyncWatcher } = require("./sync-watcher.cjs");
 const FOCUS_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 let syncWatcher = null;
@@ -936,12 +937,12 @@ let syncWatchKey = "";
 let syncStartTimer = null;
 let lastFocusSync = 0;
 
-async function triggerAutoSync() {
+async function triggerSyncCheck() {
   if (!backendSession || quitting) return;
   try {
-    await postJson("/api/sync/start", { trigger: "auto" });
+    await postJson("/api/sync/check", {});
   } catch {
-    // Busy or offline: the next change, focus or session start retries.
+    // Offline or unreadable library: the next change, focus or session start retries.
   }
 }
 
@@ -959,15 +960,15 @@ function refreshSyncWatcher() {
   closeSyncWatcher();
   if (!key) return;
   syncWatchKey = key;
-  syncWatcher = createSyncWatcher({ root: backendSession.vaultRoot, onTrigger: () => void triggerAutoSync() });
-  syncStartTimer = setTimeout(() => { syncStartTimer = null; void triggerAutoSync(); }, 5000);
+  syncWatcher = createSyncWatcher({ root: backendSession.vaultRoot, onTrigger: () => void triggerSyncCheck() });
+  syncStartTimer = setTimeout(() => { syncStartTimer = null; void triggerSyncCheck(); }, 5000);
   lastFocusSync = Date.now();
 }
 
 app.on("browser-window-focus", () => {
   if (Date.now() - lastFocusSync < FOCUS_SYNC_INTERVAL_MS) return;
   lastFocusSync = Date.now();
-  void triggerAutoSync();
+  void triggerSyncCheck();
 });
 
 app.whenReady().then(() => {

@@ -227,5 +227,79 @@ class TestSyncApply(SyncTestCase):
         self.assertEqual(self.sync()["status"], "cancelled")
 
 
+class TestSyncCheck(SyncTestCase):
+    def index_matching_scan(self):
+        self.service._load_assets = lambda: {"assets": [{"asset_key": "k1", "versions": [
+            {"file": "a.unitypackage", "size_bytes": 3},
+            {"file": "b.unitypackage", "size_bytes": 5}]}]}
+
+    def check(self) -> Any:
+        status, _, body = self.post("/api/sync/check")
+        self.assertEqual(status, 200, body)
+        return body
+
+    def test_reports_index_changes_without_writing(self):
+        body = self.check()
+        self.assertFalse(body["skipped"])
+        check = body["sync_check"]
+        self.assertEqual(check["index"], {"added": 2, "removed": 1, "resized": 0})
+        self.assertTrue(check["needed"])
+        self.assertEqual(self.h.update_calls, [])
+        self.assertIsNone(self.service._sync)
+        _, _, raw = self.h.request("GET", "/api/state")
+        self.assertEqual(json.loads(raw)["sync_check"], check)
+
+    def test_not_needed_when_index_matches_and_nothing_pending(self):
+        self.index_matching_scan()
+        check = self.check()["sync_check"]
+        self.assertEqual(check["index"], {"added": 0, "removed": 0, "resized": 0})
+        self.assertEqual(check["pending"], 0)
+        self.assertFalse(check["needed"])
+
+    def test_pending_needed_until_a_match_tried_that_count(self):
+        self.index_matching_scan()
+        self.pending = 3
+        self.assertTrue(self.check()["sync_check"]["needed"])
+        self.service._last_auto_match = (0.0, 3)
+        self.assertFalse(self.check()["sync_check"]["needed"])
+
+    def test_skipped_while_sync_runs(self):
+        self.pending = 1
+        release = threading.Event()
+        self.service._runner = lambda argv: stage_proc(argv, self.calls, release=release)
+        self.start()
+        self.assertTrue(_await(lambda: self.calls))
+        scans = []
+        self.service._scan = lambda root, strict=True, progress=None: scans.append(1) or []
+        body = self.check()
+        self.assertTrue(body["skipped"])
+        self.assertIsNone(body["sync_check"])
+        self.assertEqual(scans, [])
+        release.set()
+        self.wait_status("review", "completed")
+
+    def test_scan_error_keeps_cached_result(self):
+        cached = self.check()["sync_check"]
+
+        def broken(root, strict=True, progress=None):
+            raise OSError("vault offline")
+
+        self.service._scan = broken
+        body = self.check()
+        self.assertTrue(body["skipped"])
+        self.assertEqual(body["sync_check"], cached)
+
+    def test_finished_sync_clears_check(self):
+        self.no_review()
+        self.assertIsNotNone(self.check()["sync_check"])
+        self.start()
+        self.wait_status("completed")
+        self.assertIsNone(self.service._sync_check)
+
+    def test_check_requires_csrf(self):
+        status, _, _ = self.h.post("/api/sync/check", token="wrong")
+        self.assertEqual(status, 403)
+
+
 if __name__ == "__main__":
     unittest.main()

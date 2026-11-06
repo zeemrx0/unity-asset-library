@@ -16,6 +16,7 @@ Serves the React/Electron app's fixed JSON API:
     POST /api/organize/apply confirm an organize preview by plan_hash
     POST /api/enrich/start   pending-only resolve -> enrich -> emit background job
     POST /api/enrich/cancel  terminate the job's child process
+    POST /api/sync/check     read-only: would a sync change anything? (cached in state)
     POST /api/sync/start     index -> store match -> review plan (trigger manual|auto)
     POST /api/sync/apply     confirm the sync review by review_hash
     POST /api/sync/cancel    stop a running sync or dismiss its review
@@ -169,6 +170,8 @@ class ViewerService:
         self._action_thread = None
         self._sync = None
         self._sync_rerun = False
+        self._sync_check = None
+        self._sync_check_lock = threading.Lock()
         self._last_auto_match = (0.0, None)
         self._scan = ia.scan
         self._plan_cleanup = self._plan_cleanup_impl
@@ -363,6 +366,7 @@ class ViewerService:
             job = self._job_snapshot(self._job)
             action = self._action_snapshot(self._action)
             sync = self._sync_snapshot(self._sync)
+            sync_check = self._sync_check
         return {
             "service": "unity-asset-library",
             "api_version": storage.API_VERSION,
@@ -374,6 +378,7 @@ class ViewerService:
             "job": job,
             "action": action,
             "sync": sync,
+            "sync_check": sync_check,
             "csrf": self.token,
         }
 
@@ -562,10 +567,8 @@ class ViewerService:
             except favorite_packages.StoreError as exc:
                 raise SafetyError(str(exc)) from exc
 
-    def resync_preview(self, scanned, progress=None):
-        if progress:
-            progress({"stage": "compare", "completed": 0, "total": len(scanned),
-                      "current_item": None, "counts": {}})
+    def _index_diff(self, scanned):
+        """(previous manifest, current manifest, diff) of a scan against the index."""
         try:
             previous = ia.manifest_of(self._load_assets())
         except FileNotFoundError:
@@ -573,7 +576,13 @@ class ViewerService:
         except ValueError as exc:
             raise SafetyError("The index is unreadable; resync cannot safely preview changes.") from exc
         current = {row["rel_path"]: row["size"] for row in scanned}
-        diff = ia.diff_manifest(previous, current, had_previous=True)
+        return previous, current, ia.diff_manifest(previous, current, had_previous=True)
+
+    def resync_preview(self, scanned, progress=None):
+        if progress:
+            progress({"stage": "compare", "completed": 0, "total": len(scanned),
+                      "current_item": None, "counts": {}})
+        previous, current, diff = self._index_diff(scanned)
         preview = {
             "kind": "resync",
             "additions": [{"path": p, "size_bytes": current[p]} for p in diff["added"]],
@@ -1047,6 +1056,47 @@ class ViewerService:
                              name=f"sync-{job['id']}").start()
         return {"job_id": job["id"], "coalesced": False}
 
+    def _any_operation_active(self):
+        """Caller holds _job_lock."""
+        return self._sync_active() or any(
+            other and other["status"] in ("queued", "running")
+            for other in (self._action, self._job))
+
+    def op_sync_check(self):
+        """Read-only: report index changes and unmatched assets a sync would handle.
+
+        Never writes the index or the vault and never starts a sync. While any
+        operation runs (or another check is scanning) it returns the cached
+        result with skipped=True; a scan or index read error leaves the cache as is.
+        """
+        if not self._sync_check_lock.acquire(blocking=False):
+            with self._job_lock:
+                return {"sync_check": self._sync_check, "skipped": True}
+        try:
+            with self._job_lock:
+                if self._shutting_down or self._any_operation_active():
+                    return {"sync_check": self._sync_check, "skipped": True}
+                before = self._sync
+            try:
+                _, _, diff = self._index_diff(self._strict_scan())
+                pending = self._pending_count()
+            except (OSError, ValueError, SafetyError):
+                with self._job_lock:
+                    return {"sync_check": self._sync_check, "skipped": True}
+            totals = {key: len(diff[key]) for key in ("added", "removed", "resized")}
+            # Pending assets the last match already tried stay quiet until the count changes.
+            pending_new = pending > 0 and pending != self._last_auto_match[1]
+            check = {"checked_at": time.time(), "index": totals, "pending": pending,
+                     "needed": any(totals.values()) or pending_new}
+            with self._job_lock:
+                # A sync or action that started during the scan makes this result stale.
+                if self._sync is not before or self._any_operation_active():
+                    return {"sync_check": self._sync_check, "skipped": True}
+                self._sync_check = check
+            return {"sync_check": check, "skipped": False}
+        finally:
+            self._sync_check_lock.release()
+
     def _sync_progress(self, job):
         return lambda event: self._publish_job_progress(job, event)
 
@@ -1059,6 +1109,8 @@ class ViewerService:
             job["error_code"] = error_code
             job["current_item"] = None
             job["finished_at"] = time.time()
+            if status in ("completed", "review"):
+                self._sync_check = None  # the library is in sync; the next check re-evaluates
 
     def _sync_cancelled(self, job):
         with self._job_lock:
@@ -1414,6 +1466,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "/api/organize/apply": (["plan_hash", "csrf"], ()),
             "/api/enrich/start": (["csrf"], ()),
             "/api/enrich/cancel": (["csrf"], ()),
+            "/api/sync/check": (["csrf"], ()),
             "/api/sync/start": (["csrf"], ("trigger",)),
             "/api/sync/apply": (["csrf", "review_hash"], ()),
             "/api/sync/cancel": (["csrf"], ()),
@@ -1450,6 +1503,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"job_id": service.op_enrich_start()}, 202)
             elif path == "/api/enrich/cancel":
                 self._send_json(service.op_enrich_cancel())
+            elif path == "/api/sync/check":
+                self._send_json(service.op_sync_check())
             elif path == "/api/sync/start":
                 self._send_json(service.op_sync_start(body.get("trigger", "manual")), 202)
             elif path == "/api/sync/apply":

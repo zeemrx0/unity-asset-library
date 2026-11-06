@@ -28,7 +28,8 @@ declare global {
   type ActionJob = ProgressSnapshot & { id: string; kind: "resync" | "cleanup" | "organize"; phase: "plan" | "apply"; status: string; result?: ActionResult | null; error?: string | null; error_code?: string | null };
   type SyncReview = { review_hash: string; count: number; unavailable: string[]; cleanup: { preview: ActionPreview; plan_hash: string } | null; organize: { preview: ActionPreview; plan_hash: string } | null };
   type SyncJob = ProgressSnapshot & { id: string; kind: "sync"; trigger: "manual" | "auto"; status: "queued" | "running" | "review" | "completed" | "failed" | "cancelled"; remaining?: number | null; error?: string | null; error_code?: string | null; result?: { index?: { added: number; removed: number; resized: number }; pending_after?: number | null; review?: SyncReview | null; applied?: number } | null };
-  type State = { service: string; api_version?: number; ready: boolean; csrf: string; pending_enrichment: number; job: Job; action: ActionJob | null; sync?: SyncJob | null; vault_root: string; repo: string; instance_id: string };
+  type SyncCheck = { checked_at: number; index: { added: number; removed: number; resized: number }; pending: number; needed: boolean };
+  type State = { service: string; api_version?: number; ready: boolean; csrf: string; pending_enrichment: number; job: Job; action: ActionJob | null; sync?: SyncJob | null; sync_check?: SyncCheck | null; vault_root: string; repo: string; instance_id: string };
   type PlanRow = { path?: string; src?: string; dst?: string; size_bytes?: number; previous_size_bytes?: number };
   type CleanupFamily = { asset_key: string; reason: string; survivor: PlanRow | null; removals: PlanRow[] };
   type ActionPreview = { families?: CleanupFamily[]; additions?: PlanRow[]; removals?: PlanRow[]; resized?: PlanRow[]; moves?: PlanRow[]; totals?: Record<string, number> };

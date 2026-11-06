@@ -70,6 +70,13 @@ type SortMode = "name" | "author" | "size";
 const api = window.ual;
 const shortcutModifier = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
+function syncCheckNotice(check: SyncCheck) {
+  const { added, removed, resized } = check.index;
+  const changes = [added && `${added} new`, removed && `${removed} removed`, resized && `${resized} resized`].filter(Boolean);
+  const parts = [changes.length ? `Library changes found: ${changes.join(", ")}` : "", check.pending ? `${check.pending} without Store details` : ""].filter(Boolean);
+  return parts.length ? `${parts.join(" · ")}. Sync when ready.` : "";
+}
+
 function isTextEditing(target: EventTarget | null) {
   return target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest("input:not([type=checkbox]):not([type=radio]), textarea, select, [role=combobox], [role=textbox]")));
 }
@@ -814,8 +821,8 @@ function App() {
       return next.length === current.length ? current : next;
     });
   }, [userTags]);
-  // Poll while a sync runs (auto syncs start in the background), refresh the
-  // library when one finishes, and slow-poll otherwise to notice auto syncs.
+  // Poll while a sync runs, refresh the library when one finishes, and slow-poll
+  // otherwise to pick up the desktop's background sync check (the notice below).
   const syncSeenRef = useRef("");
   useEffect(() => {
     if (!storage?.ready || storageBusy) return;
@@ -1301,6 +1308,9 @@ function App() {
     if (syncJob?.status === "completed" && syncReviewOpen) setSyncReviewOpen(false);
   }, [syncJob?.id, syncJob?.status, syncJob?.error_code]);
   const syncVisible = syncJob && syncJob.status !== "review" ? syncJob : null;
+  const syncCheck = state?.sync_check ?? null;
+  const syncAvailable = Boolean(syncCheck?.needed && !syncReview && !syncRunning && !syncStarting);
+  const syncNotice = syncAvailable && syncCheck ? syncCheckNotice(syncCheck) : "";
   const visibleJobs = [syncVisible, state?.job, importJob, packageJob].filter((job) => job && !dismissedIds.has(job.id));
   const taskCount = visibleJobs.length + Number(Boolean(downloadMessage)) + Number(Boolean(packageJobError));
   const runningTasks = visibleJobs.filter((job) => job && ["queued", "running"].includes(job.status)).length + Number(Boolean(downloadingAsset));
@@ -1355,15 +1365,16 @@ function App() {
           <Button type="button" className="icon-button theme-toggle" title={`Theme: ${theme}. Switch to ${theme === "system" ? "light" : theme === "light" ? "dark" : "system"}`} aria-label={`Theme: ${theme}. Switch to ${theme === "system" ? "light" : theme === "light" ? "dark" : "system"}`} onPress={() => setTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")}>
             <Icon as={theme === "system" ? Monitor : theme === "light" ? Sun : Moon} className="icon" aria-hidden="true" />
           </Button>
+          {syncNotice && <span className="sync-notice" role="status" title={syncNotice}>{syncNotice}</span>}
           <Button
             type="button"
             ref={syncTriggerRef}
             className={`button ${syncReview ? "primary" : "quiet"} sync-button`}
-            data-state={syncReview ? "review" : syncRunning || syncStarting ? "running" : syncJob?.status === "failed" ? "failed" : "idle"}
+            data-state={syncReview ? "review" : syncRunning || syncStarting ? "running" : syncJob?.status === "failed" ? "failed" : syncAvailable ? "available" : "idle"}
             onPress={() => { if (syncReview) { setSyncReviewError(""); setSyncReviewOpen(true); } else void startSync(); }}
             isDisabled={!syncReview && (libraryActivity || loading || storageBusy)}
-            aria-label={syncReview ? `Review ${syncReview.count} changes` : syncRunning || syncStarting ? "Syncing library" : "Sync library"}
-            title="Update the index, match Store details, and plan file changes"
+            aria-label={syncReview ? `Review ${syncReview.count} changes` : syncRunning || syncStarting ? "Syncing library" : syncAvailable ? "Sync library, changes available" : "Sync library"}
+            title={syncNotice || "Update the index, match Store details, and plan file changes"}
           >
             <Icon as={syncRunning || syncStarting ? LoaderCircle : RefreshCw} className={`icon${syncRunning || syncStarting ? " task-spinner" : ""}`} aria-hidden="true" focusable={false} />
             {syncReview ? `Review ${syncReview.count} change${syncReview.count === 1 ? "" : "s"}` : syncRunning || syncStarting ? "Syncing…" : syncJob?.status === "failed" ? "Sync failed · Retry" : "Sync"}

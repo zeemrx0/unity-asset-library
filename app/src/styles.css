@@ -159,6 +159,7 @@ h1 {
   .topbar h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .topbar { gap: 12px; }
   .top-actions { flex-shrink: 0; }
+  .sync-notice { display: none; }
 }
 .connection {
   display: flex;
@@ -810,6 +811,8 @@ html[data-focus-visible="false"] .asset-context-menu__item:focus-visible { box-s
 .sync-button { gap: 8px; }
 .sync-button[data-state="review"] { background: var(--accent); color: var(--accent-ink, #fff); }
 .sync-button[data-state="failed"] { color: var(--danger, var(--accent)); }
+.sync-button[data-state="available"] { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent-text); }
+.sync-notice { min-width: 0; max-width: 320px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 
 
 .progress-panel {
