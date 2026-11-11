@@ -6,5 +6,5 @@ module.exports = {
     `release/unity-asset-library-${version}-arm64.dmg`,
     `release/unity-asset-library-${version}-arm64.zip`,
   ],
-  notes: 'macOS Apple Silicon (arm64). Python and dependencies are included. This app is ad-hoc signed, not notarized. Install in Applications. If macOS blocks first launch, use System Settings > Privacy & Security > Open Anyway. Stable updates are SHA-256 verified and installed after a confirmed restart.',
+  notes: 'macOS Apple Silicon (arm64). Python and dependencies are included. This app is ad-hoc signed, not notarized. Install with `brew install zeemrx0/tap/unity-asset-library`, or install in Applications. If macOS blocks first launch, use System Settings > Privacy & Security > Open Anyway. Stable updates are SHA-256 verified and installed after a confirmed restart.',
 };

@@ -75,3 +75,11 @@ jobs:
 
       - name: Publish verified release
         run: node scripts/ci/publish-release.cjs stable
+
+      - name: Update Homebrew cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          bash scripts/ci/bump-homebrew-cask.sh "$version" "release/unity-asset-library-${version}-arm64.zip"
